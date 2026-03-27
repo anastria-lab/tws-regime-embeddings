@@ -1,3 +1,26 @@
+# Directories to ignore
+QGIS/
+InputData/
+
+# Ignore docs documents
+*.docx
+
+# Ignore Shapefiles and related files
+*.dbf
+*.prj
+*.sbn
+*.sbx
+*.shp
+*.shp.xml
+*.shx
+*.zip
+
+# Ignore PDF files
+*.pdf
+
+# Ignore .nc files
+*.nc
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
