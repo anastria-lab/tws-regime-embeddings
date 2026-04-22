@@ -1,6 +1,6 @@
-# Directories to ignore
-QGIS/
-InputData/
+# Files to ignore
+*.zip
+*.nc
 
 # Ignore docs documents
 *.docx
@@ -14,12 +14,11 @@ InputData/
 *.shp.xml
 *.shx
 *.zip
+*.gpkg
 
 # Ignore PDF files
 *.pdf
 
-# Ignore .nc files
-*.nc
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

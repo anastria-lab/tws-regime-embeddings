@@ -2,22 +2,78 @@
 #    uv pip compile requirements.in -o requirements.txt
 attrs==26.1.0
     # via ecmwf-datastores-client
+cartopy==0.25.0
+    # via -r requirements.in
 cdsapi==0.7.7
     # via -r requirements.in
 certifi==2026.2.25
-    # via requests
+    # via
+    #   pyogrio
+    #   pyproj
+    #   requests
 charset-normalizer==3.4.6
     # via requests
 colorama==0.4.6
     # via tqdm
+contourpy==1.3.3
+    # via matplotlib
+cycler==0.12.1
+    # via matplotlib
 ecmwf-datastores-client==0.5.0
     # via cdsapi
+fonttools==4.62.1
+    # via matplotlib
+geopandas==1.1.3
+    # via -r requirements.in
 idna==3.11
     # via requests
+kiwisolver==1.5.0
+    # via matplotlib
+matplotlib==3.10.8
+    # via
+    #   -r requirements.in
+    #   cartopy
 multiurl==0.3.7
     # via ecmwf-datastores-client
+numpy==2.4.4
+    # via
+    #   cartopy
+    #   contourpy
+    #   geopandas
+    #   matplotlib
+    #   pandas
+    #   pyogrio
+    #   shapely
+    #   xarray
+packaging==26.0
+    # via
+    #   cartopy
+    #   geopandas
+    #   matplotlib
+    #   pyogrio
+    #   xarray
+pandas==3.0.1
+    # via
+    #   -r requirements.in
+    #   geopandas
+    #   xarray
+pillow==12.1.1
+    # via matplotlib
+pyogrio==0.12.1
+    # via geopandas
+pyparsing==3.3.2
+    # via matplotlib
+pyproj==3.7.2
+    # via
+    #   cartopy
+    #   geopandas
+pyshp==3.0.3
+    # via cartopy
 python-dateutil==2.9.0.post0
-    # via multiurl
+    # via
+    #   matplotlib
+    #   multiurl
+    #   pandas
 pytz==2026.1.post1
     # via multiurl
 requests==2.33.0
@@ -25,6 +81,10 @@ requests==2.33.0
     #   cdsapi
     #   ecmwf-datastores-client
     #   multiurl
+shapely==2.1.2
+    # via
+    #   cartopy
+    #   geopandas
 six==1.17.0
     # via python-dateutil
 tqdm==4.67.3
@@ -33,5 +93,9 @@ tqdm==4.67.3
     #   multiurl
 typing-extensions==4.15.0
     # via ecmwf-datastores-client
+tzdata==2025.3
+    # via pandas
 urllib3==2.6.3
     # via requests
+xarray==2026.2.0
+    # via -r requirements.in
