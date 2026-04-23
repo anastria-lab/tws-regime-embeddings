@@ -1,6 +1,9 @@
 # Files to ignore
 *.zip
 *.nc
+*.parquet
+*.png
+*.csv
 
 # Ignore docs documents
 *.docx

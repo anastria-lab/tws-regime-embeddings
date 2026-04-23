@@ -1,0 +1,31 @@
+wavelet_transform:
+  transform_type: swt
+  wavelet_family: db4
+  levels: 5
+  padding_method: reflect
+scale_grouping:
+  short: D1 + D2
+  seasonal: D3
+  long: D4 + D5 + A5
+input:
+  file: data/processed/basin_dataset_anomaly_normalized.parquet
+  value_type: anomaly_normalized
+  variables:
+  - swvl1_anomaly_normalized
+  - swvl2_anomaly_normalized
+  - swvl3_anomaly_normalized
+  - swvl4_anomaly_normalized
+  - ssro_anomaly_normalized
+  - sro_anomaly_normalized
+  - e_anomaly_normalized
+  - tp_anomaly_normalized
+  - pev_anomaly_normalized
+  - lai_hv_anomaly_normalized
+  - lai_lv_anomaly_normalized
+  - lwe_thickness_anomaly_normalized
+output:
+  dataset: data/processed/basin_dataset_wavelet_multiscale.parquet
+  variance_table: results/tables/wavelet_variance_partition.csv
+  reconstruction_table: results/tables/wavelet_reconstruction_error.csv
+  summary_table: results/tables/wavelet_basin_variable_summary.csv
+  figures: results/figures/wavelet_examples
