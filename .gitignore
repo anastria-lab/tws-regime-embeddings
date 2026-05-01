@@ -4,6 +4,7 @@
 *.parquet
 *.png
 *.csv
+*.pt
 
 # Ignore docs documents
 *.docx

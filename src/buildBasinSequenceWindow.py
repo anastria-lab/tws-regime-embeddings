@@ -3,15 +3,15 @@ import pandas as pd
 import numpy as np
 
 INPUT_FILE = "data/processed/basin_dataset_wavelet_multiscale.parquet"
-OUTPUT_FILE = "data/processed/window_metadata.parquet"
+OUTPUT_FILE = "data/processed/window_metadata_v3.parquet"
 
 WINDOW_LENGTH = 24
 STRIDE = 1
 
-TRAIN_END_YEAR = 2016
-VAL_START_YEAR = 2017
-VAL_END_YEAR = 2020
-TEST_START_YEAR = 2021
+TRAIN_END_YEAR = 2020
+VAL_START_YEAR = 2021
+VAL_END_YEAR = 2023
+TEST_START_YEAR = 2024
 
 
 def load_dataset(file_path):

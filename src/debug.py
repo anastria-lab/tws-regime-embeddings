@@ -23,13 +23,21 @@
 # print(test["tp_anomaly_normalized"].isna().mean())
 # print(test["swvl1_anomaly_normalized"].isna().mean())
 
+# import pandas as pd
+
+# df = pd.read_parquet("data/processed/basin_dataset_wavelet_multiscale.parquet")
+
+# print(df.shape)
+
+# dup = df.groupby(["basin", "year", "month"]).size()
+# print("max rows per basin-year-month:", dup.max())
+# print("value counts of duplicate multiplicity:")
+# print(dup.value_counts().sort_index().head(20))
+
+
 import pandas as pd
 
-df = pd.read_parquet("data/processed/basin_dataset_wavelet_multiscale.parquet")
+df = pd.read_parquet("data/processed/embeddings_window_level.parquet")
 
 print(df.shape)
-
-dup = df.groupby(["basin", "year", "month"]).size()
-print("max rows per basin-year-month:", dup.max())
-print("value counts of duplicate multiplicity:")
-print(dup.value_counts().sort_index().head(20))
+print(df)
