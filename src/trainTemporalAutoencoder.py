@@ -16,7 +16,8 @@ from torch.utils.data import Dataset, DataLoader
 # =========================
 # CONFIG
 # =========================
-DATA_FILE = "data/processed/basin_dataset_wavelet_multiscale.parquet"
+EVAL_DATA_FILE = "data/processed/basin_dataset_wavelet_multiscale_eval.parquet"
+ATLAS_DATA_FILE = "data/processed/basin_dataset_wavelet_multiscale.parquet"
 
 # Split-contained windows are used for fitting/evaluating the model.
 WINDOW_METADATA_FILE = "data/processed/window_metadata_v3.parquet"
@@ -62,18 +63,21 @@ def set_seed(seed=42):
 # DATA
 # =========================
 def load_inputs():
-    df = pd.read_parquet(DATA_FILE)
+    eval_df = pd.read_parquet(EVAL_DATA_FILE)
+    atlas_df = pd.read_parquet(ATLAS_DATA_FILE)
     eval_meta = pd.read_parquet(WINDOW_METADATA_FILE)
     continuous_meta = pd.read_parquet(CONTINUOUS_WINDOW_METADATA_FILE)
 
-    print(f"✅ Loaded data: {DATA_FILE}")
-    print(f"   Rows: {len(df):,}")
+    print(f"✅ Loaded evaluation SWT data: {EVAL_DATA_FILE}")
+    print(f"   Rows: {len(eval_df):,}")
+    print(f"✅ Loaded atlas SWT data: {ATLAS_DATA_FILE}")
+    print(f"   Rows: {len(atlas_df):,}")
     print(f"✅ Loaded evaluation metadata: {WINDOW_METADATA_FILE}")
     print(f"   Windows: {len(eval_meta):,}")
     print(f"✅ Loaded continuous metadata: {CONTINUOUS_WINDOW_METADATA_FILE}")
     print(f"   Windows: {len(continuous_meta):,}")
 
-    return df, eval_meta, continuous_meta
+    return eval_df, atlas_df, eval_meta, continuous_meta
 
 
 def detect_channel_columns(df):
@@ -87,6 +91,16 @@ def detect_channel_columns(df):
 
     print(f"✅ Detected {len(channels)} channels")
     return channels
+
+
+def ensure_same_channels(eval_channels, atlas_channels):
+    if eval_channels != atlas_channels:
+        only_eval = sorted(set(eval_channels) - set(atlas_channels))
+        only_atlas = sorted(set(atlas_channels) - set(eval_channels))
+        raise ValueError(
+            "Evaluation/atlas channel mismatch. "
+            f"Only evaluation: {only_eval}; only atlas: {only_atlas}"
+        )
 
 
 def prepare_panel(df, channel_cols):
@@ -417,7 +431,8 @@ def save_config(channel_cols):
         "weight_decay": WEIGHT_DECAY,
         "patience": PATIENCE,
         "device": DEVICE,
-        "input_file": DATA_FILE,
+        "evaluation_input_file": EVAL_DATA_FILE,
+        "atlas_input_file": ATLAS_DATA_FILE,
         "evaluation_window_metadata_file": WINDOW_METADATA_FILE,
         "continuous_window_metadata_file": CONTINUOUS_WINDOW_METADATA_FILE,
         "evaluation_embeddings_output": EMBEDDINGS_OUTPUT,
@@ -442,15 +457,24 @@ def main():
     print(f"Device: {DEVICE}")
     set_seed(RANDOM_SEED)
 
-    df, eval_meta, continuous_meta = load_inputs()
-    channel_cols = detect_channel_columns(df)
-    panel = prepare_panel(df, channel_cols)
+    eval_df, atlas_df, eval_meta, continuous_meta = load_inputs()
 
-    scaler = compute_train_scaler(panel, eval_meta, channel_cols)
-    panel_scaled = apply_scaler(panel, channel_cols, scaler)
+    eval_channels = detect_channel_columns(eval_df)
+    atlas_channels = detect_channel_columns(atlas_df)
+    ensure_same_channels(eval_channels, atlas_channels)
+    channel_cols = eval_channels
 
-    # Train/evaluate only on split-contained windows.
-    loaders = make_loaders(panel_scaled, eval_meta, channel_cols)
+    # The model is fitted/evaluated only with split-local SWT channels.
+    eval_panel = prepare_panel(eval_df, channel_cols)
+    # The scientific atlas uses full-record retrospective SWT channels.
+    atlas_panel = prepare_panel(atlas_df, channel_cols)
+
+    # Model-input scaling is learned from evaluation-train rows only and then frozen.
+    scaler = compute_train_scaler(eval_panel, eval_meta, channel_cols)
+    eval_panel_scaled = apply_scaler(eval_panel, channel_cols, scaler)
+    atlas_panel_scaled = apply_scaler(atlas_panel, channel_cols, scaler)
+
+    loaders = make_loaders(eval_panel_scaled, eval_meta, channel_cols)
     model = TemporalConvAutoencoder(
         n_channels=len(channel_cols), latent_dim=LATENT_DIM
     ).to(DEVICE)
@@ -462,20 +486,22 @@ def main():
     save_training_curves(history)
     save_config(channel_cols)
 
-    # Export the two deliberately distinct embedding products.
-    eval_embeddings = export_embeddings(model, panel_scaled, eval_meta, channel_cols)
+    eval_embeddings = export_embeddings(
+        model, eval_panel_scaled, eval_meta, channel_cols
+    )
     save_embeddings(eval_embeddings, EMBEDDINGS_OUTPUT, "evaluation")
 
     continuous_embeddings = export_embeddings(
-        model, panel_scaled, continuous_meta, channel_cols
+        model, atlas_panel_scaled, continuous_meta, channel_cols
     )
     save_embeddings(
         continuous_embeddings, CONTINUOUS_EMBEDDINGS_OUTPUT, "continuous-analysis"
     )
 
-    print("\n✅ Separation of roles:")
-    print("   evaluation embeddings -> reconstruction/generalization diagnostics")
-    print("   continuous embeddings -> UMAP atlas, KMeans regimes, trajectories, transitions")
+    print("\n✅ Leakage-safe role separation:")
+    print("   train/val/test reconstruction <- split-local SWT product")
+    print("   continuous scientific atlas <- full-record retrospective SWT product")
+    print("   climatology/std and model-input scaler <- train/reference period only")
     print("--- Done ---")
 
 
