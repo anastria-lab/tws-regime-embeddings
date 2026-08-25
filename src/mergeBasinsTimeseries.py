@@ -1,3 +1,6 @@
+# mergeBasinsTimeseries.py
+# Step 4.2: Merge basin-level time series from ERA5 and GRACE
+
 import os
 import xarray as xr
 import pandas as pd

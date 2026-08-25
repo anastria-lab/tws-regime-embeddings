@@ -1,3 +1,6 @@
+# era5QualityCheck.py
+# Step 2.2: Load and perform quality checks on ERA5 data. Export years and months for later merging with GRACE data.
+
 import xarray as xr
 import numpy as np
 import matplotlib.pyplot as plt

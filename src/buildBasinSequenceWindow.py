@@ -1,3 +1,6 @@
+# buildBasinSequenceWindow.py
+# Step 7: Build sequence windows for basin-level multiscale wavelet signals
+
 import os
 import pandas as pd
 import numpy as np

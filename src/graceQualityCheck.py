@@ -1,3 +1,6 @@
+# graceQualityCheck.py
+# Step 2.1: Load and perform quality checks on GRACE data. Export years and months for later merging with ERA5 data.
+
 import xarray as xr
 import pandas as pd
 import xarray as xr

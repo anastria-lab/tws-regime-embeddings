@@ -1,3 +1,6 @@
+# normalizeBasinTimeseries.py
+# Step 5: Normalize basin-level time series anomalies
+
 import os
 import numpy as np
 import pandas as pd

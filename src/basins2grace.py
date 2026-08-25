@@ -1,5 +1,5 @@
 # basins2grace.py
-# Aggregate GRACE CSR Mascon LWE data to HydroBASINS level 05 basin means
+# Step 3.1: Aggregate GRACE CSR Mascon LWE data to HydroBASINS level 05 basin means
 
 import os
 import numpy as np

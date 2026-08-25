@@ -1,3 +1,6 @@
+# basins2era5.py
+# Step 3.2: Aggregate ERA5 data to HydroBASINS level 05 basin means
+
 import os
 import numpy as np
 import xarray as xr

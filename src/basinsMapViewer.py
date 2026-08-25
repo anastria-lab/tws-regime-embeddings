@@ -1,5 +1,5 @@
 # basin_map_viewer.py
-# Geographic map viewer for basin polygons or basin-aggregated weighted means from ERA5 / GRACE
+# Step 4.1: Geographic map viewer for basin polygons or basin-aggregated weighted means from ERA5 / GRACE
 
 import xarray as xr
 import geopandas as gpd

@@ -1,5 +1,5 @@
-# wavelet_basin_multiscale.py
-# Multi-scale wavelet decomposition of basin-level anomaly-normalized signals
+# waveletBasinMultiscale.py
+# Step 6: Multi-scale wavelet decomposition of basin-level anomaly-normalized signals
 
 import os
 import warnings
@@ -38,7 +38,7 @@ ID_COLUMNS = ["basin", "year", "month", "time_era5", "time_grace"]
 EXAMPLE_BASINS = {
     "amazon": 6050298170,
     "iceland": 2050058330,
-    "tailand": 4050018280,
+    "thailand": 4050018280,
     "egypt": 1050000010,
 }
 

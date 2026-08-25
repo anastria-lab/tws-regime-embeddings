@@ -1,3 +1,6 @@
+# era5Downloader.py
+# Step 1: Download ERA5 Land monthly means data using CDS API
+
 from pathlib import Path
 import cdsapi
 
