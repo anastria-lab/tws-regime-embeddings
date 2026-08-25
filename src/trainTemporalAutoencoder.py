@@ -4,6 +4,7 @@
 import os
 import json
 import random
+import copy
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -16,10 +17,21 @@ from torch.utils.data import Dataset, DataLoader
 # CONFIG
 # =========================
 DATA_FILE = "data/processed/basin_dataset_wavelet_multiscale.parquet"
+
+# Split-contained windows are used for fitting/evaluating the model.
 WINDOW_METADATA_FILE = "data/processed/window_metadata_v3.parquet"
 
+# Full-record windows are encoded after training and used for the scientific atlas.
+CONTINUOUS_WINDOW_METADATA_FILE = "data/processed/window_metadata_continuous_v3.parquet"
+
 MODEL_OUTPUT = "models/temporal_autoencoder_v3.pt"
+
+# Evaluation embeddings retain train/val/test structure for ML diagnostics.
 EMBEDDINGS_OUTPUT = "data/processed/embeddings_window_level_v3.parquet"
+
+# Continuous embeddings are the canonical input for UMAP, regimes and trajectories.
+CONTINUOUS_EMBEDDINGS_OUTPUT = "data/processed/embeddings_window_level_continuous_v3.parquet"
+
 METRICS_OUTPUT = "results/tables/autoencoder_reconstruction_metrics_v3.csv"
 CURVES_OUTPUT = "results/figures/training_curves_v3.png"
 CONFIG_OUTPUT = "configs/temporal_autoencoder_v3.json"
@@ -51,15 +63,17 @@ def set_seed(seed=42):
 # =========================
 def load_inputs():
     df = pd.read_parquet(DATA_FILE)
-    meta = pd.read_parquet(WINDOW_METADATA_FILE)
+    eval_meta = pd.read_parquet(WINDOW_METADATA_FILE)
+    continuous_meta = pd.read_parquet(CONTINUOUS_WINDOW_METADATA_FILE)
 
     print(f"✅ Loaded data: {DATA_FILE}")
     print(f"   Rows: {len(df):,}")
+    print(f"✅ Loaded evaluation metadata: {WINDOW_METADATA_FILE}")
+    print(f"   Windows: {len(eval_meta):,}")
+    print(f"✅ Loaded continuous metadata: {CONTINUOUS_WINDOW_METADATA_FILE}")
+    print(f"   Windows: {len(continuous_meta):,}")
 
-    print(f"✅ Loaded metadata: {WINDOW_METADATA_FILE}")
-    print(f"   Windows: {len(meta):,}")
-
-    return df, meta
+    return df, eval_meta, continuous_meta
 
 
 def detect_channel_columns(df):
@@ -81,22 +95,17 @@ def prepare_panel(df, channel_cols):
 
     keep_cols = ["basin", "year", "month", "time"] + channel_cols
     df = df[keep_cols]
-
     df = df.drop_duplicates(subset=["basin", "year", "month"])
     df = df.sort_values(["basin", "time"]).reset_index(drop=True)
-
     return df
 
-def compute_train_scaler(panel_df, meta_df, channel_cols):
-    """
-    Fit channel scaler using unique basin-month rows covered by train windows.
 
-    This is faster and cleaner than counting repeated overlapping-window rows.
-    """
+def compute_train_scaler(panel_df, meta_df, channel_cols):
+    """Fit the model-input scaler using only rows covered by train windows."""
     train_meta = meta_df[meta_df["split"] == "train"].copy()
 
     if train_meta.empty:
-        raise ValueError("No train windows found in metadata.")
+        raise ValueError("No train windows found in evaluation metadata.")
 
     train_start = pd.to_datetime(train_meta["start_time"]).min()
     train_end = pd.to_datetime(train_meta["end_time"]).max()
@@ -106,12 +115,15 @@ def compute_train_scaler(panel_df, meta_df, channel_cols):
         (panel_df["time"] <= train_end)
     ].copy()
 
-    # Keep only basins that actually appear in train metadata
     train_basins = set(train_meta["basin"].unique())
     train_rows = train_rows[train_rows["basin"].isin(train_basins)]
 
     mean = train_rows[channel_cols].mean()
     std = train_rows[channel_cols].std(ddof=0).replace(0, np.nan)
+
+    if std.isna().any():
+        bad = list(std[std.isna()].index)
+        raise ValueError(f"Zero/undefined training std for channels: {bad}")
 
     scaler = {
         "mean": mean.to_dict(),
@@ -122,30 +134,24 @@ def compute_train_scaler(panel_df, meta_df, channel_cols):
         "n_train_basins": int(len(train_basins)),
     }
 
-    print("✅ Fitted train-only channel scaler from unique basin-month rows")
+    print("✅ Fitted train-only model-input scaler")
     print(f"   Train scaler period: {train_start.date()} to {train_end.date()}")
     print(f"   Train rows used: {len(train_rows):,}")
     print(f"   Train basins used: {len(train_basins):,}")
-
     return scaler
+
 
 def apply_scaler(panel_df, channel_cols, scaler):
     panel_df = panel_df.copy()
-
     for c in channel_cols:
-        mean = scaler["mean"][c]
-        std = scaler["std"][c]
-        panel_df[c] = (panel_df[c] - mean) / std
-
+        panel_df[c] = (panel_df[c] - scaler["mean"][c]) / scaler["std"][c]
     return panel_df
 
 
 class BasinWindowDataset(Dataset):
     def __init__(self, panel_df, metadata_df, channel_cols):
-        self.panel_df = panel_df
         self.metadata = metadata_df.reset_index(drop=True).copy()
         self.channel_cols = channel_cols
-
         self.lookup = {
             basin: g.sort_values("time").reset_index(drop=True)
             for basin, g in panel_df.groupby("basin")
@@ -156,13 +162,11 @@ class BasinWindowDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.metadata.iloc[idx]
-
         basin = row["basin"]
         start_time = pd.to_datetime(row["start_time"])
         end_time = pd.to_datetime(row["end_time"])
 
         basin_df = self.lookup[basin]
-
         window = basin_df[
             (basin_df["time"] >= start_time) &
             (basin_df["time"] <= end_time)
@@ -171,17 +175,11 @@ class BasinWindowDataset(Dataset):
         x = window[self.channel_cols].to_numpy(dtype=np.float32)
 
         if x.shape != (WINDOW_LENGTH, len(self.channel_cols)):
-            raise ValueError(
-                f"Bad window shape for sample {row['sample_id']}: {x.shape}"
-            )
-
+            raise ValueError(f"Bad window shape for sample {row['sample_id']}: {x.shape}")
         if not np.isfinite(x).all():
             raise ValueError(f"NaN/inf found in sample {row['sample_id']}")
 
-        return {
-            "x": torch.from_numpy(x),
-            "sample_id": int(row["sample_id"]),
-        }
+        return {"x": torch.from_numpy(x), "sample_id": int(row["sample_id"])}
 
 
 # =========================
@@ -199,12 +197,10 @@ class TemporalConvAutoencoder(nn.Module):
             nn.Conv1d(32, 16, kernel_size=3, padding=1),
             nn.ReLU(),
         )
-
         self.pool = nn.AdaptiveAvgPool1d(1)
         self.to_latent = nn.Linear(16, latent_dim)
 
         self.from_latent = nn.Linear(latent_dim, 16 * WINDOW_LENGTH)
-
         self.decoder_conv = nn.Sequential(
             nn.Conv1d(16, 32, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -214,24 +210,20 @@ class TemporalConvAutoencoder(nn.Module):
         )
 
     def encode(self, x):
-        # x: batch, time, channels
         x = x.transpose(1, 2)  # batch, channels, time
         z = self.encoder_conv(x)
         z = self.pool(z).squeeze(-1)
-        h = self.to_latent(z)
-        return h
+        return self.to_latent(z)
 
     def decode(self, h):
         z = self.from_latent(h)
         z = z.view(h.size(0), 16, WINDOW_LENGTH)
         x_hat = self.decoder_conv(z)
-        x_hat = x_hat.transpose(1, 2)  # batch, time, channels
-        return x_hat
+        return x_hat.transpose(1, 2)
 
     def forward(self, x):
         h = self.encode(x)
-        x_hat = self.decode(h)
-        return x_hat, h
+        return self.decode(h), h
 
 
 # =========================
@@ -242,9 +234,7 @@ def make_loaders(panel_df, meta_df, channel_cols):
 
     for split in ["train", "val", "test"]:
         split_meta = meta_df[meta_df["split"] == split].copy()
-
         dataset = BasinWindowDataset(panel_df, split_meta, channel_cols)
-
         loaders[split] = DataLoader(
             dataset,
             batch_size=BATCH_SIZE,
@@ -252,50 +242,43 @@ def make_loaders(panel_df, meta_df, channel_cols):
             num_workers=0,
             drop_last=False,
         )
+        print(f"✅ {split}: {len(dataset):,} evaluation windows")
 
-        print(f"✅ {split}: {len(dataset):,} windows")
+    if len(loaders["train"].dataset) == 0 or len(loaders["val"].dataset) == 0:
+        raise ValueError("Training and validation splits must both contain windows.")
 
     return loaders
 
 
 def run_epoch(model, loader, optimizer=None):
     is_train = optimizer is not None
-
-    if is_train:
-        model.train()
-    else:
-        model.eval()
+    model.train() if is_train else model.eval()
 
     total_loss = 0.0
-    n_samples = 0
-
+    n_values = 0
     criterion = nn.MSELoss(reduction="sum")
 
     for batch in loader:
         x = batch["x"].to(DEVICE)
-
         if is_train:
             optimizer.zero_grad()
 
         with torch.set_grad_enabled(is_train):
             x_hat, _ = model(x)
             loss = criterion(x_hat, x)
-
             if is_train:
                 loss.backward()
                 optimizer.step()
 
         total_loss += loss.item()
-        n_samples += x.numel()
+        n_values += x.numel()
 
-    return total_loss / n_samples
+    return np.nan if n_values == 0 else total_loss / n_values
 
 
 def train_model(model, loaders):
     optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=LEARNING_RATE,
-        weight_decay=WEIGHT_DECAY,
+        model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
     )
 
     history = []
@@ -305,22 +288,15 @@ def train_model(model, loaders):
 
     for epoch in range(1, EPOCHS + 1):
         train_loss = run_epoch(model, loaders["train"], optimizer)
-        val_loss = run_epoch(model, loaders["val"], optimizer)
+        val_loss = run_epoch(model, loaders["val"], optimizer=None)
 
-        history.append({
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "val_loss": val_loss,
-        })
-
-        print(
-            f"Epoch {epoch:03d} | "
-            f"train={train_loss:.6f} | val={val_loss:.6f}"
-        )
+        history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
+        print(f"Epoch {epoch:03d} | train={train_loss:.6f} | val={val_loss:.6f}")
 
         if val_loss < best_val:
             best_val = val_loss
-            best_state = model.state_dict()
+            # Deep copy is required so the stored best weights do not keep changing.
+            best_state = copy.deepcopy(model.state_dict())
             patience_count = 0
         else:
             patience_count += 1
@@ -337,35 +313,35 @@ def train_model(model, loaders):
 
 def evaluate_splits(model, loaders):
     rows = []
-
     for split, loader in loaders.items():
         loss = run_epoch(model, loader, optimizer=None)
         rows.append({
             "split": split,
+            "n_windows": len(loader.dataset),
             "mse": loss,
-            "rmse": float(np.sqrt(loss)),
+            "rmse": float(np.sqrt(loss)) if np.isfinite(loss) else np.nan,
         })
 
     metrics = pd.DataFrame(rows)
     print("\n✅ Reconstruction metrics:")
     print(metrics.to_string(index=False))
-
     return metrics
 
 
 # =========================
 # EXPORTS
 # =========================
-def export_embeddings(model, loader, metadata_df):
-    model.eval()
+def export_embeddings(model, panel_df, metadata_df, channel_cols):
+    dataset = BasinWindowDataset(panel_df, metadata_df, channel_cols)
+    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
+    model.eval()
     all_rows = []
 
     with torch.no_grad():
         for batch in loader:
             x = batch["x"].to(DEVICE)
             sample_ids = batch["sample_id"].cpu().numpy()
-
             h = model.encode(x).cpu().numpy()
 
             for sid, vec in zip(sample_ids, h):
@@ -375,49 +351,25 @@ def export_embeddings(model, loader, metadata_df):
                 all_rows.append(row)
 
     emb = pd.DataFrame(all_rows)
-
-    meta_cols = ["sample_id", "basin", "start_time", "end_time", "split"]
-    emb = metadata_df[meta_cols].merge(emb, on="sample_id", how="inner")
-
-    emb = emb.sort_values("sample_id").reset_index(drop=True)
-    return emb
+    metadata_cols = [c for c in metadata_df.columns if c != "sample_id"]
+    emb = metadata_df[["sample_id"] + metadata_cols].merge(emb, on="sample_id", how="inner")
+    return emb.sort_values("sample_id").reset_index(drop=True)
 
 
-def export_all_embeddings(model, panel_df, meta_df, channel_cols):
-    full_dataset = BasinWindowDataset(panel_df, meta_df, channel_cols)
-
-    full_loader = DataLoader(
-        full_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=0,
-    )
-
-    embeddings = export_embeddings(model, full_loader, meta_df)
-
-    os.makedirs(os.path.dirname(EMBEDDINGS_OUTPUT), exist_ok=True)
-    embeddings.to_parquet(EMBEDDINGS_OUTPUT, index=False)
-
-    print(f"✅ Saved embeddings: {EMBEDDINGS_OUTPUT}")
+def save_embeddings(embeddings, output_file, label):
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    embeddings.to_parquet(output_file, index=False)
+    print(f"✅ Saved {label} embeddings: {output_file}")
 
     latent_cols = [c for c in embeddings.columns if c.startswith("z")]
     stds = embeddings[latent_cols].std()
-
-    print("\nEmbedding collapse check — latent std:")
-    print(stds)
-
-    collapsed = (stds < 1e-6).sum()
-    if collapsed == 0:
-        print("✅ No collapsed latent dimensions detected.")
-    else:
-        print(f"⚠️ {collapsed} latent dimensions appear collapsed.")
-
+    collapsed = int((stds < 1e-6).sum())
+    print(f"   {label} latent collapse check: {collapsed} collapsed dimensions")
     return embeddings
 
 
 def save_model(model, channel_cols, scaler):
     os.makedirs(os.path.dirname(MODEL_OUTPUT), exist_ok=True)
-
     checkpoint = {
         "model_state_dict": model.state_dict(),
         "n_channels": len(channel_cols),
@@ -426,7 +378,6 @@ def save_model(model, channel_cols, scaler):
         "channel_cols": channel_cols,
         "scaler": scaler,
     }
-
     torch.save(checkpoint, MODEL_OUTPUT)
     print(f"✅ Saved model: {MODEL_OUTPUT}")
 
@@ -439,7 +390,6 @@ def save_metrics(metrics):
 
 def save_training_curves(history):
     os.makedirs(os.path.dirname(CURVES_OUTPUT), exist_ok=True)
-
     plt.figure(figsize=(10, 6))
     plt.plot(history["epoch"], history["train_loss"], label="train")
     plt.plot(history["epoch"], history["val_loss"], label="validation")
@@ -451,13 +401,11 @@ def save_training_curves(history):
     plt.tight_layout()
     plt.savefig(CURVES_OUTPUT, dpi=200, bbox_inches="tight")
     plt.close()
-
     print(f"✅ Saved training curves: {CURVES_OUTPUT}")
 
 
 def save_config(channel_cols):
     os.makedirs(os.path.dirname(CONFIG_OUTPUT), exist_ok=True)
-
     config = {
         "model": "TemporalConvAutoencoder",
         "input_shape": [WINDOW_LENGTH, len(channel_cols)],
@@ -470,12 +418,19 @@ def save_config(channel_cols):
         "patience": PATIENCE,
         "device": DEVICE,
         "input_file": DATA_FILE,
-        "window_metadata_file": WINDOW_METADATA_FILE,
+        "evaluation_window_metadata_file": WINDOW_METADATA_FILE,
+        "continuous_window_metadata_file": CONTINUOUS_WINDOW_METADATA_FILE,
+        "evaluation_embeddings_output": EMBEDDINGS_OUTPUT,
+        "continuous_embeddings_output": CONTINUOUS_EMBEDDINGS_OUTPUT,
+        "analysis_note": (
+            "The autoencoder is fit only with split-contained evaluation windows. "
+            "Continuous full-record windows are encoded after training for scientific "
+            "state-space, clustering, trajectory, and transition analyses."
+        ),
     }
 
     with open(CONFIG_OUTPUT, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
-
     print(f"✅ Saved config: {CONFIG_OUTPUT}")
 
 
@@ -485,26 +440,21 @@ def save_config(channel_cols):
 def main():
     print("--- Step 8: Temporal autoencoder representation learning ---")
     print(f"Device: {DEVICE}")
-
     set_seed(RANDOM_SEED)
 
-    df, meta = load_inputs()
+    df, eval_meta, continuous_meta = load_inputs()
     channel_cols = detect_channel_columns(df)
-
     panel = prepare_panel(df, channel_cols)
 
-    scaler = compute_train_scaler(panel, meta, channel_cols)
-    panel = apply_scaler(panel, channel_cols, scaler)
+    scaler = compute_train_scaler(panel, eval_meta, channel_cols)
+    panel_scaled = apply_scaler(panel, channel_cols, scaler)
 
-    loaders = make_loaders(panel, meta, channel_cols)
-
+    # Train/evaluate only on split-contained windows.
+    loaders = make_loaders(panel_scaled, eval_meta, channel_cols)
     model = TemporalConvAutoencoder(
-        n_channels=len(channel_cols),
-        latent_dim=LATENT_DIM,
+        n_channels=len(channel_cols), latent_dim=LATENT_DIM
     ).to(DEVICE)
-
     model, history = train_model(model, loaders)
-
     metrics = evaluate_splits(model, loaders)
 
     save_model(model, channel_cols, scaler)
@@ -512,8 +462,20 @@ def main():
     save_training_curves(history)
     save_config(channel_cols)
 
-    export_all_embeddings(model, panel, meta, channel_cols)
+    # Export the two deliberately distinct embedding products.
+    eval_embeddings = export_embeddings(model, panel_scaled, eval_meta, channel_cols)
+    save_embeddings(eval_embeddings, EMBEDDINGS_OUTPUT, "evaluation")
 
+    continuous_embeddings = export_embeddings(
+        model, panel_scaled, continuous_meta, channel_cols
+    )
+    save_embeddings(
+        continuous_embeddings, CONTINUOUS_EMBEDDINGS_OUTPUT, "continuous-analysis"
+    )
+
+    print("\n✅ Separation of roles:")
+    print("   evaluation embeddings -> reconstruction/generalization diagnostics")
+    print("   continuous embeddings -> UMAP atlas, KMeans regimes, trajectories, transitions")
     print("--- Done ---")
 
 

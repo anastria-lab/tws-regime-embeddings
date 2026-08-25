@@ -1,12 +1,18 @@
 # buildBasinSequenceWindow.py
-# Step 7: Build sequence windows for basin-level multiscale wavelet signals
+# Step 7: Build evaluation and continuous analysis windows for basin-level multiscale signals
 
 import os
 import pandas as pd
 import numpy as np
 
 INPUT_FILE = "data/processed/basin_dataset_wavelet_multiscale.parquet"
-OUTPUT_FILE = "data/processed/window_metadata_v3.parquet"
+
+# Split-aware windows used ONLY for model training / validation / test evaluation.
+EVAL_OUTPUT_FILE = "data/processed/window_metadata_v3.parquet"
+
+# Full-record rolling windows used for the hydrological atlas, clustering,
+# basin trajectories, and regime-transition analysis.
+CONTINUOUS_OUTPUT_FILE = "data/processed/window_metadata_continuous_v3.parquet"
 
 WINDOW_LENGTH = 24
 STRIDE = 1
@@ -30,44 +36,29 @@ def load_dataset(file_path):
 
 
 def build_canonical_time(df):
-    """
-    Build a canonical monthly timestamp from year/month.
-    """
+    """Build a canonical monthly timestamp from year/month."""
     df = df.copy()
-    df["time"] = pd.to_datetime(
-        dict(year=df["year"], month=df["month"], day=1)
-    )
+    df["time"] = pd.to_datetime(dict(year=df["year"], month=df["month"], day=1))
     return df
 
 
 def detect_channel_columns(df):
-    """
-    Detect model-ready multiscale channel columns.
-    """
+    """Detect model-ready multiscale channel columns."""
     suffixes = ("_short", "_seasonal", "_long")
-
-    channel_cols = [
-        c for c in df.columns
-        if c.endswith(suffixes)
-    ]
+    channel_cols = sorted([c for c in df.columns if c.endswith(suffixes)])
 
     if not channel_cols:
         raise ValueError("No multiscale channel columns found.")
 
-    channel_cols = sorted(channel_cols)
-
     print("✅ Detected multiscale channels:")
     for c in channel_cols:
         print(f"   - {c}")
-
     print(f"✅ Total channels: {len(channel_cols)}")
     return channel_cols
 
 
 def assign_split(df):
-    """
-    Assign train/val/test split by time blocks.
-    """
+    """Assign each basin-month to a time-block split."""
     df = df.copy()
 
     conditions = [
@@ -87,19 +78,16 @@ def assign_split(df):
 
 
 def month_diff(t1, t2):
-    """
-    Difference in whole months between two timestamps.
-    """
+    """Difference in whole months between two timestamps."""
     return (t2.year - t1.year) * 12 + (t2.month - t1.month)
 
 
 def is_consecutive_month_window(times):
-    """
-    Check that timestamps are strictly consecutive monthly timestamps.
-    """
+    """Check that timestamps are strictly consecutive monthly timestamps."""
     if len(times) < 2:
         return True
 
+    times = pd.Series(pd.to_datetime(times)).reset_index(drop=True)
     for i in range(len(times) - 1):
         if month_diff(times.iloc[i], times.iloc[i + 1]) != 1:
             return False
@@ -107,16 +95,43 @@ def is_consecutive_month_window(times):
 
 
 def has_no_missing_channels(window_df, channel_cols):
-    """
-    Check no missing values inside the window for selected channels.
-    """
-    return not window_df[channel_cols].isnull().any().any()
+    """Require finite model channels throughout a window."""
+    values = window_df[channel_cols].to_numpy(dtype=float)
+    return np.isfinite(values).all()
 
 
-def create_windows_for_group(group_df, basin_id, split_name, channel_cols):
-    """
-    Create rolling windows for one basin and one split.
-    """
+def make_window_record(window_df, basin_id, channel_cols, window_set, forced_split=None):
+    """Create one metadata record from a valid 24-month window."""
+    start_split = str(window_df["split"].iloc[0])
+    end_split = str(window_df["split"].iloc[-1])
+    crosses_boundary = start_split != end_split
+
+    if forced_split is not None:
+        split_label = forced_split
+    else:
+        split_label = start_split if not crosses_boundary else "cross_boundary"
+
+    return {
+        "sample_id": None,
+        "basin": basin_id,
+        "window_set": window_set,
+        "split": split_label,
+        "start_split": start_split,
+        "end_split": end_split,
+        "crosses_split_boundary": bool(crosses_boundary),
+        "start_time": window_df["time"].iloc[0],
+        "end_time": window_df["time"].iloc[-1],
+        "start_year": int(window_df["year"].iloc[0]),
+        "start_month": int(window_df["month"].iloc[0]),
+        "end_year": int(window_df["year"].iloc[-1]),
+        "end_month": int(window_df["month"].iloc[-1]),
+        "window_length": WINDOW_LENGTH,
+        "n_channels": len(channel_cols),
+    }
+
+
+def create_windows_for_group(group_df, basin_id, channel_cols, window_set, forced_split=None):
+    """Create rolling windows from one already-selected basin time series."""
     group_df = group_df.sort_values("time").reset_index(drop=True)
 
     windows = []
@@ -126,178 +141,192 @@ def create_windows_for_group(group_df, basin_id, split_name, channel_cols):
         end_idx = start_idx + WINDOW_LENGTH
         window_df = group_df.iloc[start_idx:end_idx]
 
-        # Check exact window length
         if len(window_df) != WINDOW_LENGTH:
             continue
-
-        # Check monthly continuity
         if not is_consecutive_month_window(window_df["time"]):
             continue
-
-        # Check channel completeness
         if not has_no_missing_channels(window_df, channel_cols):
             continue
 
-        row = {
-            "sample_id": None,  # fill later
-            "basin": basin_id,
-            "split": split_name,
-            "start_time": window_df["time"].iloc[0],
-            "end_time": window_df["time"].iloc[-1],
-            "start_year": int(window_df["year"].iloc[0]),
-            "start_month": int(window_df["month"].iloc[0]),
-            "end_year": int(window_df["year"].iloc[-1]),
-            "end_month": int(window_df["month"].iloc[-1]),
-            "window_length": WINDOW_LENGTH,
-            "n_channels": len(channel_cols),
-        }
-
-        windows.append(row)
+        windows.append(
+            make_window_record(
+                window_df=window_df,
+                basin_id=basin_id,
+                channel_cols=channel_cols,
+                window_set=window_set,
+                forced_split=forced_split,
+            )
+        )
 
     return windows
 
 
-def build_window_metadata(df, channel_cols):
+def finalize_metadata(all_windows, label):
+    metadata = pd.DataFrame(all_windows)
+
+    if metadata.empty:
+        print(f"⚠️ No {label} windows were created.")
+        return metadata
+
+    metadata = metadata.sort_values(["basin", "start_time", "end_time"]).reset_index(drop=True)
+    metadata["sample_id"] = np.arange(len(metadata), dtype=np.int64)
+    metadata["window_index_within_basin"] = metadata.groupby("basin").cumcount()
+
+    print(f"✅ Built {label} metadata")
+    print(f"   Total windows: {len(metadata):,}")
+    print(f"   Basins: {metadata['basin'].nunique():,}")
+    return metadata
+
+
+def build_evaluation_window_metadata(df, channel_cols):
     """
-    Build window metadata across all basins and splits.
+    Build split-contained windows for model training/evaluation.
+
+    No window is allowed to cross train/validation/test boundaries.
     """
     all_windows = []
-
     valid_df = df[df["split"].isin(["train", "val", "test"])].copy()
 
     for basin_id, basin_df in valid_df.groupby("basin"):
         for split_name, split_df in basin_df.groupby("split"):
-            split_df = split_df.sort_values("time").reset_index(drop=True)
-
             windows = create_windows_for_group(
                 split_df,
                 basin_id=basin_id,
-                split_name=split_name,
-                channel_cols=channel_cols
+                channel_cols=channel_cols,
+                window_set="evaluation",
+                forced_split=split_name,
             )
             all_windows.extend(windows)
 
-    metadata = pd.DataFrame(all_windows)
-
-    if metadata.empty:
-        print("⚠️ No windows were created.")
-        return metadata
-
-    metadata = metadata.reset_index(drop=True)
-    metadata["sample_id"] = np.arange(len(metadata))
-
-    print(f"✅ Built window metadata")
-    print(f"   Total windows: {len(metadata):,}")
-
-    return metadata
+    return finalize_metadata(all_windows, "evaluation")
 
 
-def sanity_check_window_counts(metadata):
+def build_continuous_window_metadata(df, channel_cols):
     """
-    Check window counts per basin and split.
+    Build full-record rolling windows independently of train/val/test boundaries.
+
+    These windows are NOT used to fit the autoencoder. They are encoded only after
+    training and are the correct source for the continuous hydrological state-space
+    atlas, trajectories, clustering, and transition analysis.
     """
-    print("\n" + "=" * 60)
-    print("SANITY CHECK 1 — Window counts per basin")
-    print("=" * 60)
+    all_windows = []
+    valid_df = df[df["split"].isin(["train", "val", "test"])].copy()
 
-    if metadata.empty:
-        print("⚠️ Metadata is empty.")
-        return
+    for basin_id, basin_df in valid_df.groupby("basin"):
+        windows = create_windows_for_group(
+            basin_df,
+            basin_id=basin_id,
+            channel_cols=channel_cols,
+            window_set="continuous",
+            forced_split=None,
+        )
+        all_windows.extend(windows)
 
-    counts = metadata.groupby(["split", "basin"]).size().reset_index(name="n_windows")
-    print(counts.groupby("split")["n_windows"].describe())
+    return finalize_metadata(all_windows, "continuous-analysis")
 
 
-def sanity_check_no_split_leakage(metadata):
-    """
-    Check that no basin-time window appears in multiple splits.
-    """
-    print("\n" + "=" * 60)
-    print("SANITY CHECK 2 — No split leakage")
-    print("=" * 60)
+def sanity_check_window_counts(metadata, label):
+    print("\n" + "=" * 70)
+    print(f"SANITY CHECK — Window counts ({label})")
+    print("=" * 70)
 
     if metadata.empty:
         print("⚠️ Metadata is empty.")
         return
 
-    key_counts = (
-        metadata.groupby(["basin", "start_time", "end_time"])["split"]
-        .nunique()
-    )
+    counts = metadata.groupby("basin").size()
+    print(counts.describe())
 
-    leakage = (key_counts > 1).sum()
+    if "split" in metadata.columns:
+        print("\nCounts by split label:")
+        print(metadata["split"].value_counts().sort_index().to_string())
 
-    if leakage == 0:
-        print("✅ No split leakage detected.")
+
+def sanity_check_no_evaluation_split_leakage(metadata):
+    """Evaluation metadata must contain no cross-boundary windows."""
+    print("\n" + "=" * 70)
+    print("SANITY CHECK — Evaluation split containment")
+    print("=" * 70)
+
+    if metadata.empty:
+        print("⚠️ Metadata is empty.")
+        return
+
+    n_cross = int(metadata["crosses_split_boundary"].sum())
+    if n_cross == 0:
+        print("✅ Evaluation windows are fully contained within their assigned split.")
     else:
-        print(f"❌ Split leakage detected in {leakage} windows.")
+        raise ValueError(f"Evaluation metadata contains {n_cross} cross-boundary windows.")
 
 
-def sanity_check_shapes(metadata, expected_channels):
+def sanity_check_shapes(metadata, expected_channels, label):
+    if metadata.empty:
+        return
+
+    bad_length = int((metadata["window_length"] != WINDOW_LENGTH).sum())
+    bad_channels = int((metadata["n_channels"] != expected_channels).sum())
+
+    if bad_length or bad_channels:
+        raise ValueError(
+            f"{label}: bad_length={bad_length}, bad_channels={bad_channels}"
+        )
+
+    print(f"✅ {label}: all windows are {WINDOW_LENGTH} months × {expected_channels} channels.")
+
+
+def sanity_check_continuous_start_gaps(metadata):
     """
-    Check shape metadata.
+    Report gaps between successive valid rolling-window starts.
+
+    A gap does not automatically indicate a bug: it can arise when source months or
+    model channels are missing. We deliberately do not draw trajectory lines across
+    such gaps downstream.
     """
-    print("\n" + "=" * 60)
-    print("SANITY CHECK 3 — Shape check")
-    print("=" * 60)
+    print("\n" + "=" * 70)
+    print("SANITY CHECK — Continuous trajectory start gaps")
+    print("=" * 70)
 
     if metadata.empty:
         print("⚠️ Metadata is empty.")
         return
 
-    bad_length = (metadata["window_length"] != WINDOW_LENGTH).sum()
-    bad_channels = (metadata["n_channels"] != expected_channels).sum()
+    gap_rows = []
+    for basin_id, group in metadata.groupby("basin"):
+        times = pd.to_datetime(group.sort_values("start_time")["start_time"]).reset_index(drop=True)
+        for i in range(len(times) - 1):
+            gap = month_diff(times.iloc[i], times.iloc[i + 1])
+            if gap != STRIDE:
+                gap_rows.append((basin_id, times.iloc[i], times.iloc[i + 1], gap))
 
-    if bad_length == 0:
-        print(f"✅ All windows have length {WINDOW_LENGTH}.")
+    if not gap_rows:
+        print(f"✅ All successive continuous window starts advance by {STRIDE} month.")
     else:
-        print(f"❌ {bad_length} windows have incorrect length.")
-
-    if bad_channels == 0:
-        print(f"✅ All windows have {expected_channels} channels.")
-    else:
-        print(f"❌ {bad_channels} windows have incorrect channel counts.")
-
-
-def sanity_check_split_ranges(metadata):
-    """
-    Check split date ranges.
-    """
-    print("\n" + "=" * 60)
-    print("SANITY CHECK 4 — Split time ranges")
-    print("=" * 60)
-
-    if metadata.empty:
-        print("⚠️ Metadata is empty.")
-        return
-
-    summary = metadata.groupby("split").agg(
-        min_start=("start_time", "min"),
-        max_end=("end_time", "max"),
-        n_windows=("sample_id", "count"),
-    )
-
-    print(summary)
+        affected_basins = len(set(r[0] for r in gap_rows))
+        print(
+            f"⚠️ Found {len(gap_rows):,} gaps in valid window starts across "
+            f"{affected_basins:,} basins."
+        )
+        print("   These will be shown as breaks, not connected jumps, in trajectory plots.")
+        print("   We will separately fix/review source-month continuity before the final rerun.")
 
 
-def save_metadata(metadata, output_file):
-    """
-    Save window metadata to parquet.
-    """
+def save_metadata(metadata, output_file, label):
     try:
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
         metadata.to_parquet(output_file, index=False)
-        print(f"\n✅ Saved window metadata to: {output_file}")
+        print(f"✅ Saved {label} metadata: {output_file}")
         return output_file
     except Exception as e:
-        print(f"❌ Failed to save window metadata: {e}")
+        print(f"❌ Failed to save {label} metadata: {e}")
         return None
 
 
 def main():
-    print("--- Build basin sequence windows ---")
+    print("--- Step 7: Build basin sequence windows ---")
     print(f"Window length: {WINDOW_LENGTH} months")
     print(f"Stride: {STRIDE} month")
+    print("Mode A: split-contained windows for model evaluation")
+    print("Mode B: continuous full-record windows for scientific analysis")
 
     df = load_dataset(INPUT_FILE)
     if df is None:
@@ -306,22 +335,29 @@ def main():
     required_cols = {"basin", "year", "month"}
     missing_required = required_cols - set(df.columns)
     if missing_required:
-        print(f"❌ Missing required columns: {missing_required}")
-        return
+        raise ValueError(f"Missing required columns: {missing_required}")
 
     df = build_canonical_time(df)
     df = assign_split(df)
-
     channel_cols = detect_channel_columns(df)
 
-    metadata = build_window_metadata(df, channel_cols)
+    eval_metadata = build_evaluation_window_metadata(df, channel_cols)
+    continuous_metadata = build_continuous_window_metadata(df, channel_cols)
 
-    sanity_check_window_counts(metadata)
-    sanity_check_no_split_leakage(metadata)
-    sanity_check_shapes(metadata, expected_channels=len(channel_cols))
-    sanity_check_split_ranges(metadata)
+    sanity_check_window_counts(eval_metadata, "evaluation")
+    sanity_check_no_evaluation_split_leakage(eval_metadata)
+    sanity_check_shapes(eval_metadata, len(channel_cols), "evaluation")
 
-    save_metadata(metadata, OUTPUT_FILE)
+    sanity_check_window_counts(continuous_metadata, "continuous analysis")
+    sanity_check_shapes(continuous_metadata, len(channel_cols), "continuous analysis")
+    sanity_check_continuous_start_gaps(continuous_metadata)
+
+    if not continuous_metadata.empty:
+        n_cross = int(continuous_metadata["crosses_split_boundary"].sum())
+        print(f"✅ Continuous set intentionally retains {n_cross:,} windows that cross split boundaries.")
+
+    save_metadata(eval_metadata, EVAL_OUTPUT_FILE, "evaluation")
+    save_metadata(continuous_metadata, CONTINUOUS_OUTPUT_FILE, "continuous-analysis")
 
     print("--- Done ---")
 
