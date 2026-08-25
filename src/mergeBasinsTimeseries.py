@@ -5,8 +5,8 @@ import os
 import xarray as xr
 import pandas as pd
 
-ERA5_FILE = "data/interim/era5_basin_means_level05.nc"
-GRACE_FILE = "data/interim/grace_basin_means_level05.nc"
+ERA5_FILE = "data/interim/era5_basin_means_level04.nc"
+GRACE_FILE = "data/interim/grace_basin_means_level04.nc"
 OUTPUT_FILE = "data/interim/basin_era5_grace_merged.parquet"
 
 

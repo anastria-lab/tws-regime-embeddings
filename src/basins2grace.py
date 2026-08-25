@@ -1,5 +1,5 @@
 # basins2grace.py
-# Step 3.1: Aggregate GRACE CSR Mascon LWE data to HydroBASINS level 05 basin means
+# Step 3.1: Aggregate GRACE CSR Mascon LWE data to HydroBASINS level 04 basin means
 
 import os
 import numpy as np
@@ -12,8 +12,8 @@ import pandas as pd
 # CONFIG
 # =========================
 GRACE_FILE = "data/raw/grace/CSR_GRACE_GRACE-FO_RL0603_Mascons_all-corrections.nc"
-BASINS_FILE = "data/interim/hydrobasins_l05_global.gpkg"
-OUTPUT_FILE = "data/interim/grace_basin_means_level05.nc"
+BASINS_FILE = "data/interim/hydrobasins_l04_global.gpkg"
+OUTPUT_FILE = "data/interim/grace_basin_means_level04.nc"
 
 # Change if your GRACE variable has a different name
 VARIABLES = [
@@ -256,10 +256,10 @@ def compute_basin_means(ds, mask, basins_gdf, lon_name, lat_name, time_name):
     if time_name in out.dims and time_name != "time":
         out = out.rename({time_name: "time"})
 
-    out["basin"].attrs["long_name"] = "HydroBASINS level 05 basin id"
+    out["basin"].attrs["long_name"] = "HydroBASINS level 04 basin id"
     out.attrs["source_basins_file"] = BASINS_FILE
     out.attrs["description"] = (
-        "Weighted mean values per HydroBASINS level 05 basin and timestep "
+        "Weighted mean values per HydroBASINS level 04 basin and timestep "
         "using cosine(latitude) area weights"
     )
 

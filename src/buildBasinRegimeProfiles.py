@@ -1,189 +1,302 @@
-# buildBasinRegimeProfiles.py
-# Step 9.3: Basin-level regime occupancy profiles (split-aware)
+# mapBasinRegimeProfiles.py
+# Step 9.3.1: Map basin-level hydrological regime profiles
 
 import os
 import pandas as pd
-import numpy as np
+import geopandas as gpd
 import matplotlib.pyplot as plt
 
-CLUSTERS_FILE = "data/processed/window_clusters.parquet"
+BASINS_FILE = "data/interim/hydrobasins_l04_global.gpkg"
+PROFILE_FILE = "data/processed/basin_cluster_profiles.parquet"
+SPLIT_PROFILE_FILE = "data/processed/basin_cluster_profiles_split.parquet"
 
-OUTPUT_MAIN = "data/processed/basin_cluster_profiles.parquet"
-OUTPUT_SPLIT = "data/processed/basin_cluster_profiles_split.parquet"
-OUTPUT_SUMMARY = "results/tables/basin_cluster_profiles_summary.csv"
+FIG_DIR = "results/figures/regime_maps"
 
-FIG_DIR = "results/figures/regime_profiles/"
-
-
-def load_clusters():
-    df = pd.read_parquet(CLUSTERS_FILE)
-    print(f"✅ Loaded clusters: {CLUSTERS_FILE}")
-    print(f"   Rows: {len(df):,}")
-    return df
+BASIN_ID_COLUMN = "HYBAS_ID"
 
 
-def compute_profiles(df):
-    """
-    Compute:
-    1. Overall basin regime fractions
-    2. Split-aware basin regime fractions
-    """
+def load_inputs():
+    basins = gpd.read_file(BASINS_FILE)
+    profiles = pd.read_parquet(PROFILE_FILE)
+    split_profiles = pd.read_parquet(SPLIT_PROFILE_FILE)
 
-    # --------------------------
-    # Overall profiles
-    # --------------------------
-    overall = (
-        df.groupby(["basin_id", "cluster"])
-        .size()
-        .rename("count")
-        .reset_index()
+    print(f"✅ Loaded basins: {BASINS_FILE}")
+    print(f"   Basins: {len(basins):,}")
+
+    print(f"✅ Loaded overall profiles: {PROFILE_FILE}")
+    print(f"   Rows: {len(profiles):,}")
+
+    print(f"✅ Loaded split profiles: {SPLIT_PROFILE_FILE}")
+    print(f"   Rows: {len(split_profiles):,}")
+
+    return basins, profiles, split_profiles
+
+
+def prepare_profiles(profiles):
+    cluster_cols = [c for c in profiles.columns if c.startswith("cluster_") and c.endswith("_frac")]
+
+    if not cluster_cols:
+        raise ValueError("No cluster fraction columns found.")
+
+    profiles = profiles.copy()
+
+    profiles["dominant_cluster"] = (
+        profiles[cluster_cols]
+        .idxmax(axis=1)
+        .str.extract(r"cluster_(\d+)_frac")
+        .astype(int)
     )
 
-    total_per_basin = overall.groupby("basin_id")["count"].transform("sum")
-    overall["fraction"] = overall["count"] / total_per_basin
+    profiles["dominant_cluster_frac"] = profiles[cluster_cols].max(axis=1)
 
-    overall_pivot = overall.pivot_table(
-        index="basin_id",
-        columns="cluster",
-        values="fraction",
-        fill_value=0
+    return profiles, cluster_cols
+
+
+def prepare_split_profiles(split_profiles):
+    cluster_cols = [c for c in split_profiles.columns if c.startswith("cluster_") and c.endswith("_frac")]
+
+    split_profiles = split_profiles.copy()
+
+    split_profiles["dominant_cluster"] = (
+        split_profiles[cluster_cols]
+        .idxmax(axis=1)
+        .str.extract(r"cluster_(\d+)_frac")
+        .astype(int)
     )
 
-    overall_pivot.columns = [f"cluster_{c}_frac" for c in overall_pivot.columns]
-    overall_pivot = overall_pivot.reset_index()
+    split_profiles["dominant_cluster_frac"] = split_profiles[cluster_cols].max(axis=1)
 
-    # --------------------------
-    # Split-aware profiles
-    # --------------------------
-    split_df = (
-        df.groupby(["basin_id", "split", "cluster"])
-        .size()
-        .rename("count")
-        .reset_index()
+    return split_profiles, cluster_cols
+
+
+def join_to_basins(basins, profiles):
+    basins = basins[[BASIN_ID_COLUMN, "geometry"]].copy()
+
+    basins[BASIN_ID_COLUMN] = basins[BASIN_ID_COLUMN].astype(str)
+    profiles = profiles.copy()
+    profiles["basin_id"] = profiles["basin_id"].astype(str)
+
+    gdf = basins.merge(
+        profiles,
+        left_on=BASIN_ID_COLUMN,
+        right_on="basin_id",
+        how="left"
     )
 
-    total_per_split = split_df.groupby(["basin_id", "split"])["count"].transform("sum")
-    split_df["fraction"] = split_df["count"] / total_per_split
-
-    split_pivot = split_df.pivot_table(
-        index=["basin_id", "split"],
-        columns="cluster",
-        values="fraction",
-        fill_value=0
-    )
-
-    split_pivot.columns = [f"cluster_{c}_frac" for c in split_pivot.columns]
-    split_pivot = split_pivot.reset_index()
-
-    return overall_pivot, split_pivot
+    return gdf
 
 
-def save_outputs(overall, split):
-    os.makedirs(os.path.dirname(OUTPUT_MAIN), exist_ok=True)
-    os.makedirs(os.path.dirname(OUTPUT_SUMMARY), exist_ok=True)
-
-    overall.to_parquet(OUTPUT_MAIN, index=False)
-    split.to_parquet(OUTPUT_SPLIT, index=False)
-
-    print(f"✅ Saved overall profiles: {OUTPUT_MAIN}")
-    print(f"✅ Saved split profiles: {OUTPUT_SPLIT}")
-
-    summary = overall.describe()
-    summary.to_csv(OUTPUT_SUMMARY)
-    print(f"✅ Saved summary stats: {OUTPUT_SUMMARY}")
-
-
-# --------------------------
-# FIGURES
-# --------------------------
-
-def plot_global_distribution(df):
+def plot_dominant_cluster(gdf):
     os.makedirs(FIG_DIR, exist_ok=True)
 
-    global_dist = df["cluster"].value_counts(normalize=True).sort_index()
+    plt.figure(figsize=(16, 9))
+    ax = plt.gca()
 
-    plt.figure(figsize=(6, 4))
-    global_dist.plot(kind="bar")
-    plt.title("Global regime distribution")
-    plt.ylabel("Fraction")
-    plt.xlabel("Cluster")
-    plt.tight_layout()
-
-    path = os.path.join(FIG_DIR, "regime_global_distribution.png")
-    plt.savefig(path, dpi=200)
-    plt.close()
-
-    print(f"✅ Saved: {path}")
-
-
-def plot_split_distribution(df):
-    dist = (
-        df.groupby(["split", "cluster"])
-        .size()
-        .groupby(level=0)
-        .apply(lambda x: x / x.sum())
-        .unstack()
-        .fillna(0)
+    gdf.plot(
+        column="dominant_cluster",
+        ax=ax,
+        categorical=True,
+        legend=True,
+        cmap="tab10",
+        linewidth=0.05,
+        edgecolor="black",
+        missing_kwds={
+            "color": "lightgrey",
+            "label": "No data"
+        }
     )
 
-    plt.figure(figsize=(8, 5))
-    dist.plot(kind="bar", stacked=True)
-
-    plt.title("Regime distribution by split")
-    plt.ylabel("Fraction")
-    plt.xlabel("Split")
-    plt.legend(title="Cluster", bbox_to_anchor=(1.05, 1))
+    ax.set_title("Dominant Hydrological Regime by Basin")
+    ax.set_axis_off()
     plt.tight_layout()
 
-    path = os.path.join(FIG_DIR, "regime_split_comparison.png")
-    plt.savefig(path, dpi=200)
+    out = os.path.join(FIG_DIR, "dominant_regime_by_basin.png")
+    plt.savefig(out, dpi=220, bbox_inches="tight")
     plt.close()
 
-    print(f"✅ Saved: {path}")
+    print(f"✅ Saved: {out}")
 
 
-def plot_example_basins(overall, n=10):
-    """
-    Show regime profiles for a few basins
-    """
-    sample = overall.sample(n=min(n, len(overall)), random_state=42)
+def plot_dominant_strength(gdf):
+    plt.figure(figsize=(16, 9))
+    ax = plt.gca()
 
-    cluster_cols = [c for c in overall.columns if "cluster_" in c]
+    gdf.plot(
+        column="dominant_cluster_frac",
+        ax=ax,
+        legend=True,
+        cmap="viridis",
+        vmin=0,
+        vmax=1,
+        linewidth=0.05,
+        edgecolor="black",
+        missing_kwds={
+            "color": "lightgrey",
+            "label": "No data"
+        }
+    )
 
-    plt.figure(figsize=(10, 6))
-
-    for i, (_, row) in enumerate(sample.iterrows()):
-        plt.plot(cluster_cols, row[cluster_cols], marker="o", label=str(row["basin_id"]))
-
-    plt.title("Example basin regime profiles")
-    plt.ylabel("Fraction")
-    plt.xticks(rotation=45)
-    plt.legend(bbox_to_anchor=(1.05, 1))
+    ax.set_title("Dominant Regime Occupancy Fraction by Basin")
+    ax.set_axis_off()
     plt.tight_layout()
 
-    path = os.path.join(FIG_DIR, "top_basins_regime_distribution.png")
-    plt.savefig(path, dpi=200)
+    out = os.path.join(FIG_DIR, "dominant_regime_strength_by_basin.png")
+    plt.savefig(out, dpi=220, bbox_inches="tight")
     plt.close()
 
-    print(f"✅ Saved: {path}")
+    print(f"✅ Saved: {out}")
 
+
+def plot_cluster_fraction_maps(gdf, cluster_cols):
+    for col in cluster_cols:
+        cluster_id = col.replace("cluster_", "").replace("_frac", "")
+
+        plt.figure(figsize=(16, 9))
+        ax = plt.gca()
+
+        gdf.plot(
+            column=col,
+            ax=ax,
+            legend=True,
+            cmap="magma",
+            vmin=0,
+            vmax=1,
+            linewidth=0.05,
+            edgecolor="black",
+            missing_kwds={
+                "color": "lightgrey",
+                "label": "No data"
+            }
+        )
+
+        ax.set_title(f"Fraction of Windows in Regime {cluster_id}")
+        ax.set_axis_off()
+        plt.tight_layout()
+
+        out = os.path.join(FIG_DIR, f"cluster_{cluster_id}_fraction_by_basin.png")
+        plt.savefig(out, dpi=220, bbox_inches="tight")
+        plt.close()
+
+        print(f"✅ Saved: {out}")
+
+
+def plot_split_dominant_maps(basins, split_profiles):
+    splits = ["train", "val", "test"]
+
+    for split in splits:
+        split_df = split_profiles[split_profiles["split"] == split].copy()
+
+        if split_df.empty:
+            print(f"⚠️ No split profile rows for {split}")
+            continue
+
+        gdf = join_to_basins(basins, split_df)
+
+        plt.figure(figsize=(16, 9))
+        ax = plt.gca()
+
+        gdf.plot(
+            column="dominant_cluster",
+            ax=ax,
+            categorical=True,
+            legend=True,
+            cmap="tab10",
+            linewidth=0.05,
+            edgecolor="black",
+            missing_kwds={
+                "color": "lightgrey",
+                "label": "No data"
+            }
+        )
+
+        ax.set_title(f"Dominant Hydrological Regime by Basin — {split}")
+        ax.set_axis_off()
+        plt.tight_layout()
+
+        out = os.path.join(FIG_DIR, f"dominant_regime_by_basin_{split}.png")
+        plt.savefig(out, dpi=220, bbox_inches="tight")
+        plt.close()
+
+        print(f"✅ Saved: {out}")
+
+
+def save_mapped_profiles(gdf):
+    out_file = "data/processed/basin_cluster_profiles_mapped.gpkg"
+
+    try:
+        os.makedirs(os.path.dirname(out_file), exist_ok=True)
+        gdf.to_file(out_file, driver="GPKG")
+        print(f"✅ Saved mapped basin profiles: {out_file}")
+    except Exception as e:
+        print(f"⚠️ Could not save mapped GeoPackage: {e}")
+
+
+def plot_train_only_baseline_regime_map(basins, split_profiles):
+    """
+    Step 9.3.1.1:
+    Plot train-only dominant hydrological regime map.
+
+    This is the baseline climatological regime atlas.
+    """
+    train_df = split_profiles[split_profiles["split"] == "train"].copy()
+
+    if train_df.empty:
+        print("⚠️ No train split profile rows found.")
+        return
+
+    gdf = join_to_basins(basins, train_df)
+
+    plt.figure(figsize=(16, 9))
+    ax = plt.gca()
+
+    gdf.plot(
+        column="dominant_cluster",
+        ax=ax,
+        categorical=True,
+        legend=True,
+        cmap="tab10",
+        linewidth=0.05,
+        edgecolor="black",
+        missing_kwds={
+            "color": "lightgrey",
+            "label": "No data"
+        }
+    )
+
+    ax.set_title("Baseline Hydrological Regime Atlas — Train Period Only")
+    ax.set_axis_off()
+    plt.tight_layout()
+
+    out = os.path.join(FIG_DIR, "baseline_train_only_dominant_regime_map.png")
+    plt.savefig(out, dpi=220, bbox_inches="tight")
+    plt.close()
+
+    print(f"✅ Saved train-only baseline regime map: {out}")
 
 def main():
-    print("--- Step 9.3: Basin-level regime profiles ---")
+    print("--- Step 9.3.1: Map basin regime profiles ---")
 
-    df = load_clusters()
+    os.makedirs(FIG_DIR, exist_ok=True)
 
-    overall, split = compute_profiles(df)
-    save_outputs(overall, split)
+    basins, profiles, split_profiles = load_inputs()
 
-    # Figures
-    plot_global_distribution(df)
-    plot_split_distribution(df)
-    plot_example_basins(overall)
+    profiles, cluster_cols = prepare_profiles(profiles)
+    split_profiles, split_cluster_cols = prepare_split_profiles(split_profiles)
 
-    print("\nInterpretation:")
-    print("Each basin now has a distribution over dynamic hydrological regimes.")
-    print("These are NOT fixed classes — basins can shift regimes over time.")
+    gdf = join_to_basins(basins, profiles)
+
+    matched = gdf["basin_id"].notna().sum()
+    print(f"✅ Basins matched to profiles: {matched:,}/{len(gdf):,}")
+
+    plot_dominant_cluster(gdf)
+    plot_dominant_strength(gdf)
+    plot_cluster_fraction_maps(gdf, cluster_cols)
+    plot_split_dominant_maps(basins, split_profiles)
+
+    # Step 9.3.1.1 — baseline climatological regime atlas
+    plot_train_only_baseline_regime_map(basins, split_profiles)
+
+    save_mapped_profiles(gdf)
 
     print("--- Done ---")
 

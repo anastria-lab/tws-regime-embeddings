@@ -8,9 +8,9 @@ import pandas as pd
 import numpy as np
 from matplotlib.colors import TwoSlopeNorm, Normalize
 
-ERA5_NETCDF_FILE = "data/interim/era5_basin_means_level05.nc"
-GRACE_NETCDF_FILE = "data/interim/grace_basin_means_level05.nc"
-BASINS_FILE = "data/interim/hydrobasins_l05_global.gpkg"
+ERA5_NETCDF_FILE = "data/interim/era5_basin_means_level04.nc"
+GRACE_NETCDF_FILE = "data/interim/grace_basin_means_level04.nc"
+BASINS_FILE = "data/interim/hydrobasins_l04_global.gpkg"
 BASIN_ID_COLUMN = "HYBAS_ID"
 
 
@@ -322,7 +322,7 @@ def plot_basins_only(gdf):
         linewidth=0.2
     )
 
-    ax.set_title("HydroBASINS Level 05")
+    ax.set_title("HydroBASINS Level 04")
     ax.set_axis_off()
     plt.tight_layout()
     plt.show()
