@@ -1,5 +1,5 @@
 # waveletBasinMultiscale.py
-# Step 6: Multi-scale wavelet decomposition of basin-level anomaly-normalized signals
+# Step 6: Gap-aware multi-scale SWT decomposition of basin-level normalized anomalies
 
 import os
 import warnings
@@ -8,7 +8,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import pywt
 import yaml
-import warnings
+
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 INPUT_FILE = "data/processed/basin_dataset_anomaly_normalized.parquet"
@@ -17,7 +17,6 @@ OUTPUT_FILE = "data/processed/basin_dataset_wavelet_multiscale.parquet"
 FIGURE_DIR = "results/figures/wavelet_examples"
 VARIANCE_OUTPUT = "results/tables/wavelet_variance_partition.csv"
 RECON_ERROR_OUTPUT = "results/tables/wavelet_reconstruction_error.csv"
-
 CONFIG_OUTPUT = "configs/wavelet_config.yaml"
 SUMMARY_OUTPUT = "results/tables/wavelet_basin_variable_summary.csv"
 SUMMARY_TIDY_OUTPUT = "results/tables/wavelet_basin_variable_summary_tidy.csv"
@@ -25,16 +24,21 @@ SUMMARY_TIDY_OUTPUT = "results/tables/wavelet_basin_variable_summary_tidy.csv"
 WAVELET = "db4"
 LEVEL = 5
 
-# Expected normalized anomaly inputs
+# Short isolated gaps may be interpolated. Longer gaps (including the GRACE /
+# GRACE-FO mission gap) remain missing and split the series into independent SWT
+# segments. This prevents the wavelet transform from treating distant months as
+# adjacent observations or inventing a long bridge across the mission gap.
+MAX_INTERPOLATION_GAP_MONTHS = 2
+MIN_SEGMENT_MONTHS = 24
+
 TARGET_COLUMNS = [
     "lwe_thickness_anomaly_normalized",
     "tp_anomaly_normalized",
     "swvl1_anomaly_normalized",
 ]
 
-ID_COLUMNS = ["basin", "year", "month", "time_era5", "time_grace"]
+ID_COLUMNS = ["basin", "year", "month", "time", "time_era5", "time_grace"]
 
-# Example basins to plot. Replace the placeholder IDs below if you know them.
 EXAMPLE_BASINS = {
     "amazon": 6050298170,
     "iceland": 2050058330,
@@ -42,10 +46,8 @@ EXAMPLE_BASINS = {
     "egypt": 1050000010,
 }
 
+
 def save_wavelet_config(variables):
-    """
-    Save wavelet configuration for reproducibility.
-    """
     config = {
         "wavelet_transform": {
             "transform_type": "swt",
@@ -57,6 +59,12 @@ def save_wavelet_config(variables):
             "short": "D1 + D2",
             "seasonal": "D3",
             "long": "D4 + D5 + A5",
+        },
+        "gap_policy": {
+            "canonical_frequency": "monthly",
+            "max_interpolation_gap_months": MAX_INTERPOLATION_GAP_MONTHS,
+            "minimum_segment_months": MIN_SEGMENT_MONTHS,
+            "long_gaps": "left missing; SWT performed independently on each valid segment",
         },
         "input": {
             "file": INPUT_FILE,
@@ -72,13 +80,11 @@ def save_wavelet_config(variables):
         },
     }
 
-    try:
-        os.makedirs(os.path.dirname(CONFIG_OUTPUT), exist_ok=True)
-        with open(CONFIG_OUTPUT, "w", encoding="utf-8") as f:
-            yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True)
-        print(f"✅ Saved wavelet config: {CONFIG_OUTPUT}")
-    except Exception as e:
-        print(f"❌ Failed to save wavelet config: {e}")
+    os.makedirs(os.path.dirname(CONFIG_OUTPUT), exist_ok=True)
+    with open(CONFIG_OUTPUT, "w", encoding="utf-8") as f:
+        yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True)
+    print(f"✅ Saved wavelet config: {CONFIG_OUTPUT}")
+
 
 def load_dataset(file_path):
     try:
@@ -91,106 +97,95 @@ def load_dataset(file_path):
         return None
 
 
-def detect_available_target_columns(df):
-    """
-    Detect all normalized anomaly columns for wavelet decomposition.
-    """
-    target_cols = [
-        c for c in df.columns
-        if c.endswith("_anomaly_normalized")
-    ]
+def add_canonical_time(df):
+    """Build/validate the month-start timestamp used for all SWT operations."""
+    df = df.copy()
+    canonical = pd.to_datetime(dict(year=df["year"], month=df["month"], day=1))
 
+    if "time" in df.columns:
+        existing = pd.to_datetime(df["time"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+        mismatch = existing.notna() & (existing != canonical)
+        if mismatch.any():
+            raise ValueError(f"Canonical time disagrees with year/month in {int(mismatch.sum())} rows.")
+
+    df["time"] = canonical
+    return df
+
+
+def validate_monthly_grid(df):
+    """Require one explicit row per basin-month before wavelet decomposition."""
+    dup = df.duplicated(["basin", "time"]).sum()
+    if dup:
+        raise ValueError(f"Found {int(dup)} duplicate basin-month rows before SWT.")
+
+    bad = []
+    for basin, group in df.groupby("basin"):
+        times = group["time"].sort_values().reset_index(drop=True)
+        if len(times) < 2:
+            continue
+        month_steps = (times.dt.year.diff() * 12 + times.dt.month.diff()).iloc[1:]
+        if not (month_steps == 1).all():
+            bad.append(basin)
+
+    if bad:
+        raise ValueError(
+            f"Monthly calendar has missing timestamps for {len(bad)} basins before SWT. "
+            "Run the fixed mergeBasinsTimeseries.py first."
+        )
+
+    print("✅ SWT input has an explicit consecutive monthly calendar for every basin")
+
+
+def detect_available_target_columns(df):
+    target_cols = sorted([c for c in df.columns if c.endswith("_anomaly_normalized")])
     if not target_cols:
         raise ValueError("No normalized anomaly columns found for wavelet decomposition.")
 
     print("✅ Wavelet target columns:")
     for c in target_cols:
         print(f"   - {c}")
-
     return target_cols
 
 
-def choose_time_column(df, variable):
-    """
-    Prefer GRACE time for GRACE-derived variable, otherwise ERA5 time.
-    """
-    if variable.startswith("lwe_thickness"):
-        if "time_grace" in df.columns:
-            return "time_grace"
-    if "time_era5" in df.columns:
-        return "time_era5"
-    if "time_grace" in df.columns:
-        return "time_grace"
-    raise ValueError("No usable time column found.")
-
-
 def pad_series_for_swt(x, level):
-    """
-    SWT needs length divisible by 2**level.
-    Pad at the end using reflection.
-    """
+    """Reflect-pad one finite segment to a length divisible by 2**level."""
     x = np.asarray(x, dtype=float)
     n = len(x)
     block = 2 ** level
     target_len = int(np.ceil(n / block) * block)
     pad_len = target_len - n
-
     if pad_len == 0:
         return x, 0
-
-    x_pad = np.pad(x, (0, pad_len), mode="reflect")
-    return x_pad, pad_len
+    return np.pad(x, (0, pad_len), mode="reflect"), pad_len
 
 
-def swt_reconstruct_band(x, wavelet="db4", level=5):
-    """
-    Decompose one 1D series using SWT (MODWT-style practical choice),
-    then reconstruct interpretable bands:
-
-    short    = D1 + D2
-    seasonal = D3
-    long     = D4 + D5 + A5
-
-    Returns arrays aligned to original length.
-    """
+def swt_reconstruct_band(x, wavelet=WAVELET, level=LEVEL):
+    """Decompose one finite monthly segment and reconstruct three scale bands."""
     x = np.asarray(x, dtype=float)
-    x_pad, pad_len = pad_series_for_swt(x, level=level)
+    if not np.isfinite(x).all():
+        raise ValueError("swt_reconstruct_band received non-finite values.")
 
+    x_pad, pad_len = pad_series_for_swt(x, level=level)
     coeffs = pywt.swt(x_pad, wavelet=wavelet, level=level, norm=True)
 
-    # coeffs order:
-    # [(cA_n, cD_n), ..., (cA_1, cD_1)]
-    # so coeffs[0] is level n, coeffs[-1] is level 1
-
     def reconstruct_component(detail_levels_to_keep=None, keep_final_approx=False):
-        if detail_levels_to_keep is None:
-            detail_levels_to_keep = []
-
+        detail_levels_to_keep = detail_levels_to_keep or []
         coeffs_band = []
 
         for lev in range(level, 0, -1):
             cA, cD = coeffs[level - lev]
-
-            # Keep A5 only at the highest level if requested
-            if keep_final_approx and lev == level:
-                keep_a = cA.copy()
-            else:
-                keep_a = np.zeros_like(cA)
-
+            keep_a = cA.copy() if (keep_final_approx and lev == level) else np.zeros_like(cA)
             keep_d = cD.copy() if lev in detail_levels_to_keep else np.zeros_like(cD)
-
             coeffs_band.append((keep_a, keep_d))
 
-        rec = pywt.iswt(coeffs_band, wavelet=wavelet, norm=True)
-        return np.asarray(rec)
+        return np.asarray(pywt.iswt(coeffs_band, wavelet=wavelet, norm=True))
 
-    short_rec = reconstruct_component(detail_levels_to_keep=[1, 2], keep_final_approx=False)
-    seasonal_rec = reconstruct_component(detail_levels_to_keep=[3], keep_final_approx=False)
-    long_rec = reconstruct_component(detail_levels_to_keep=[4, 5], keep_final_approx=True)
-
+    short_rec = reconstruct_component([1, 2], keep_final_approx=False)
+    seasonal_rec = reconstruct_component([3], keep_final_approx=False)
+    long_rec = reconstruct_component([4, 5], keep_final_approx=True)
     reconstructed = short_rec + seasonal_rec + long_rec
 
-    if pad_len > 0:
+    if pad_len:
         short_rec = short_rec[:-pad_len]
         seasonal_rec = seasonal_rec[:-pad_len]
         long_rec = long_rec[:-pad_len]
@@ -204,29 +199,83 @@ def swt_reconstruct_band(x, wavelet="db4", level=5):
     }
 
 
-def safe_nanvar(x):
+def missing_run_lengths(x):
+    """Return (start, end, length) for consecutive NaN/non-finite runs."""
+    x = np.asarray(x, dtype=float)
+    missing = ~np.isfinite(x)
+    runs = []
+    i = 0
+    while i < len(x):
+        if not missing[i]:
+            i += 1
+            continue
+        start = i
+        while i < len(x) and missing[i]:
+            i += 1
+        end = i - 1
+        runs.append((start, end, end - start + 1))
+    return runs
+
+
+def interpolate_only_short_internal_gaps(x, max_gap=MAX_INTERPOLATION_GAP_MONTHS):
+    """Linearly fill only bounded missing runs whose full length <= max_gap.
+
+    Long gaps and leading/trailing missing runs are deliberately left missing.
+    """
+    x = np.asarray(x, dtype=float).copy()
+    imputed = np.zeros(len(x), dtype=bool)
+
+    for start, end, length in missing_run_lengths(x):
+        bounded = start > 0 and end < len(x) - 1
+        if not bounded or length > max_gap:
+            continue
+        if not (np.isfinite(x[start - 1]) and np.isfinite(x[end + 1])):
+            continue
+
+        left = x[start - 1]
+        right = x[end + 1]
+        fill = np.linspace(left, right, length + 2)[1:-1]
+        x[start:end + 1] = fill
+        imputed[start:end + 1] = True
+
+    return x, imputed
+
+
+def finite_segments(x):
+    """Return inclusive index ranges of consecutive finite values."""
     x = np.asarray(x, dtype=float)
     valid = np.isfinite(x)
+    segments = []
+    i = 0
+    while i < len(x):
+        if not valid[i]:
+            i += 1
+            continue
+        start = i
+        while i < len(x) and valid[i]:
+            i += 1
+        segments.append((start, i - 1))
+    return segments
 
-    if valid.sum() < 2:
-        return np.nan
 
-    return np.nanvar(x)
+def safe_nanvar(x):
+    x = np.asarray(x, dtype=float)
+    return np.nan if np.isfinite(x).sum() < 2 else np.nanvar(x)
 
 
 def compute_variance_fractions(raw, short, seasonal, long):
-    raw_var = safe_nanvar(raw)
-    short_var = safe_nanvar(short)
-    seasonal_var = safe_nanvar(seasonal)
-    long_var = safe_nanvar(long)
+    mask = np.isfinite(raw) & np.isfinite(short) & np.isfinite(seasonal) & np.isfinite(long)
+    if mask.sum() < 2:
+        return np.nan, np.nan, np.nan
 
+    raw_var = np.var(raw[mask])
     if not np.isfinite(raw_var) or raw_var == 0:
         return np.nan, np.nan, np.nan
 
     return (
-        short_var / raw_var if np.isfinite(short_var) else np.nan,
-        seasonal_var / raw_var if np.isfinite(seasonal_var) else np.nan,
-        long_var / raw_var if np.isfinite(long_var) else np.nan,
+        np.var(short[mask]) / raw_var,
+        np.var(seasonal[mask]) / raw_var,
+        np.var(long[mask]) / raw_var,
     )
 
 
@@ -234,67 +283,75 @@ def compute_rmse(x, y):
     mask = np.isfinite(x) & np.isfinite(y)
     if mask.sum() == 0:
         return np.nan
-    return np.sqrt(np.mean((x[mask] - y[mask]) ** 2))
+    return float(np.sqrt(np.mean((x[mask] - y[mask]) ** 2)))
 
 
 def decompose_one_group(group_df, variable, wavelet=WAVELET, level=LEVEL):
+    """Gap-aware SWT for one basin-variable monthly series.
+
+    1. Keep the full calendar.
+    2. Interpolate only short bounded gaps (<= configured threshold).
+    3. Leave long gaps missing.
+    4. Apply SWT independently to each sufficiently long finite segment.
     """
-    Decompose one basin-variable time series.
-    Assumes rows already sorted by time.
-    """
-    x = group_df[variable].to_numpy(dtype=float)
+    group_df = group_df.sort_values("time").reset_index(drop=True).copy()
+    x_original = group_df[variable].to_numpy(dtype=float)
+    x_filled, imputed_mask = interpolate_only_short_internal_gaps(x_original)
 
-    valid_count = np.isfinite(x).sum()
+    short = np.full(len(x_filled), np.nan, dtype=float)
+    seasonal = np.full(len(x_filled), np.nan, dtype=float)
+    long = np.full(len(x_filled), np.nan, dtype=float)
+    reconstructed = np.full(len(x_filled), np.nan, dtype=float)
 
-    # Skip all-NaN or too-sparse series
-    if valid_count < 24:
-        return None, {
-            "basin": group_df["basin"].iloc[0],
-            "variable": variable.replace("_anomaly_normalized", ""),
-            "short_frac": np.nan,
-            "seasonal_frac": np.nan,
-            "long_frac": np.nan,
-            "rmse": np.nan,
-        }
+    all_segments = finite_segments(x_filled)
+    used_segments = []
 
-    if np.isnan(x).any():
-        x = pd.Series(x).interpolate(limit_direction="both").to_numpy(dtype=float)
+    for start, end in all_segments:
+        segment_len = end - start + 1
+        if segment_len < MIN_SEGMENT_MONTHS:
+            continue
 
-    # If interpolation still leaves bad values, skip
-    if np.isfinite(x).sum() < 24:
-        return None, {
-            "basin": group_df["basin"].iloc[0],
-            "variable": variable.replace("_anomaly_normalized", ""),
-            "short_frac": np.nan,
-            "seasonal_frac": np.nan,
-            "long_frac": np.nan,
-            "rmse": np.nan,
-        }
+        bands = swt_reconstruct_band(x_filled[start:end + 1], wavelet=wavelet, level=level)
+        short[start:end + 1] = bands["short"]
+        seasonal[start:end + 1] = bands["seasonal"]
+        long[start:end + 1] = bands["long"]
+        reconstructed[start:end + 1] = bands["reconstructed"]
+        used_segments.append((start, end))
 
-
-    bands = swt_reconstruct_band(x, wavelet=wavelet, level=level)
-
-    out = group_df.copy()
     base = variable.replace("_anomaly_normalized", "")
+    out = group_df[["basin", "year", "month"]].copy()
+    out[f"{base}_short"] = short
+    out[f"{base}_seasonal"] = seasonal
+    out[f"{base}_long"] = long
+    out[f"{base}_reconstructed"] = reconstructed
 
-    out[f"{base}_short"] = bands["short"]
-    out[f"{base}_seasonal"] = bands["seasonal"]
-    out[f"{base}_long"] = bands["long"]
-    out[f"{base}_reconstructed"] = bands["reconstructed"]
+    # Compare reconstruction only with genuinely observed months, not imputed ones.
+    observed_for_eval = x_original.copy()
+    observed_for_eval[imputed_mask] = np.nan
 
     short_frac, seasonal_frac, long_frac = compute_variance_fractions(
-        x, bands["short"], bands["seasonal"], bands["long"]
+        x_filled, short, seasonal, long
     )
-    rmse = compute_rmse(x, bands["reconstructed"])
+    rmse = compute_rmse(observed_for_eval, reconstructed)
+
+    original_runs = missing_run_lengths(x_original)
+    unfilled_missing = ~np.isfinite(x_filled)
+    used_mask = np.isfinite(reconstructed)
 
     diagnostics = {
         "basin": group_df["basin"].iloc[0],
         "variable": base,
-        "n_obs": int(np.isfinite(x).sum()),
-        "signal_mean": float(np.nanmean(x)) if np.isfinite(x).any() else np.nan,
-        "signal_std": float(np.nanstd(x)) if np.isfinite(x).any() else np.nan,
-        "signal_min": float(np.nanmin(x)) if np.isfinite(x).any() else np.nan,
-        "signal_max": float(np.nanmax(x)) if np.isfinite(x).any() else np.nan,
+        "n_calendar_months": int(len(x_original)),
+        "n_observed_months": int(np.isfinite(x_original).sum()),
+        "n_missing_original": int((~np.isfinite(x_original)).sum()),
+        "n_short_gap_imputed": int(imputed_mask.sum()),
+        "n_missing_left_unfilled": int(unfilled_missing.sum()),
+        "max_original_missing_run": int(max([r[2] for r in original_runs], default=0)),
+        "n_finite_segments_after_gap_policy": int(len(all_segments)),
+        "n_swt_segments_used": int(len(used_segments)),
+        "n_months_with_swt_output": int(used_mask.sum()),
+        "min_used_segment_months": int(min([e - s + 1 for s, e in used_segments], default=0)),
+        "max_used_segment_months": int(max([e - s + 1 for s, e in used_segments], default=0)),
         "short_frac": short_frac,
         "seasonal_frac": seasonal_frac,
         "long_frac": long_frac,
@@ -309,101 +366,63 @@ def run_wavelet_decomposition(df, variables):
     per_variable_outputs = []
 
     for variable in variables:
-        time_col = choose_time_column(df, variable)
-
-        selected_cols = ["basin", "year", "month", time_col, variable]
-        selected_cols = list(dict.fromkeys(selected_cols))
-
+        selected_cols = ["basin", "year", "month", "time", variable]
         sub = df[selected_cols].copy()
-        sub[time_col] = pd.to_datetime(sub[time_col])
 
         variable_groups = []
-
         for basin_id, group in sub.groupby("basin"):
-            group = group.sort_values(time_col).reset_index(drop=True)
-
-            if len(group) < 16:
-                continue
-
+            group = group.sort_values("time").reset_index(drop=True)
             out_group, diag = decompose_one_group(group, variable)
             diagnostics.append(diag)
-
-            if out_group is not None:
-                # Keep only the keys and newly created wavelet cols
-                base = variable.replace("_anomaly_normalized", "")
-                keep_cols = [
-                    "basin", "year", "month",
-                    f"{base}_short",
-                    f"{base}_seasonal",
-                    f"{base}_long",
-                    f"{base}_reconstructed",
-                ]
-                keep_cols = [c for c in keep_cols if c in out_group.columns]
-                variable_groups.append(out_group[keep_cols].copy())
+            variable_groups.append(out_group)
 
         if variable_groups:
             variable_df = pd.concat(variable_groups, ignore_index=True)
-            variable_df = variable_df.drop_duplicates(subset=["basin", "year", "month"])
+            if variable_df.duplicated(["basin", "year", "month"]).any():
+                raise ValueError(f"Duplicate basin-month rows produced for {variable}.")
             per_variable_outputs.append(variable_df)
 
     if not per_variable_outputs:
         return pd.DataFrame(), pd.DataFrame(diagnostics)
 
-    # Merge all variable outputs horizontally
     wavelet_df = per_variable_outputs[0]
     for other_df in per_variable_outputs[1:]:
         wavelet_df = wavelet_df.merge(
-            other_df,
-            on=["basin", "year", "month"],
-            how="outer"
+            other_df, on=["basin", "year", "month"], how="outer", validate="one_to_one"
         )
 
-    diag_df = pd.DataFrame(diagnostics)
+    return wavelet_df, pd.DataFrame(diagnostics)
 
-    return wavelet_df, diag_df
 
 def merge_wavelet_outputs_back(df, wavelet_df):
-    """
-    Merge multiscale outputs back to the original dataset
-    using basin-year-month keys.
-    """
-    merge_cols = ["basin", "year", "month"]
-    merged = df.merge(wavelet_df, on=merge_cols, how="left")
-    return merged
+    return df.merge(
+        wavelet_df,
+        on=["basin", "year", "month"],
+        how="left",
+        validate="one_to_one",
+    )
 
 
 def save_tidy_summary_table(diagnostics):
-    """
-    Save clean per-basin / per-variable summary table.
-    """
-    tidy = diagnostics[
-        [
-            "basin",
-            "variable",
-            "short_frac",
-            "seasonal_frac",
-            "long_frac",
-            "rmse",
-        ]
-    ].copy()
-
-    tidy = tidy.rename(
-        columns={
-            "short_frac": "var_short_frac",
-            "seasonal_frac": "var_seasonal_frac",
-            "long_frac": "var_long_frac",
-            "rmse": "reconstruction_rmse",
-        }
-    )
-
+    cols = [
+        "basin", "variable", "n_calendar_months", "n_observed_months",
+        "n_missing_original", "n_short_gap_imputed", "n_missing_left_unfilled",
+        "max_original_missing_run", "n_swt_segments_used", "n_months_with_swt_output",
+        "short_frac", "seasonal_frac", "long_frac", "rmse",
+    ]
+    tidy = diagnostics[[c for c in cols if c in diagnostics.columns]].copy()
+    tidy = tidy.rename(columns={
+        "short_frac": "var_short_frac",
+        "seasonal_frac": "var_seasonal_frac",
+        "long_frac": "var_long_frac",
+        "rmse": "reconstruction_rmse_observed_months",
+    })
     tidy = tidy.sort_values(["variable", "basin"]).reset_index(drop=True)
 
-    try:
-        os.makedirs(os.path.dirname(SUMMARY_TIDY_OUTPUT), exist_ok=True)
-        tidy.to_csv(SUMMARY_TIDY_OUTPUT, index=False)
-        print(f"✅ Saved tidy summary table: {SUMMARY_TIDY_OUTPUT}")
-    except Exception as e:
-        print(f"❌ Failed to save tidy summary table: {e}")
+    os.makedirs(os.path.dirname(SUMMARY_TIDY_OUTPUT), exist_ok=True)
+    tidy.to_csv(SUMMARY_TIDY_OUTPUT, index=False)
+    print(f"✅ Saved tidy summary table: {SUMMARY_TIDY_OUTPUT}")
+
 
 def save_outputs(df, diagnostics):
     os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
@@ -413,159 +432,107 @@ def save_outputs(df, diagnostics):
     df.to_parquet(OUTPUT_FILE, index=False)
     print(f"✅ Saved wavelet dataset: {OUTPUT_FILE}")
 
-    variance_df = diagnostics[["basin", "variable", "short_frac", "seasonal_frac", "long_frac"]].copy()
-    variance_df.to_csv(VARIANCE_OUTPUT, index=False)
-    print(f"✅ Saved variance partition: {VARIANCE_OUTPUT}")
-
-    rmse_df = diagnostics[["basin", "variable", "rmse"]].copy()
-    rmse_df.to_csv(RECON_ERROR_OUTPUT, index=False)
-    print(f"✅ Saved reconstruction error: {RECON_ERROR_OUTPUT}")
-
+    variance_cols = ["basin", "variable", "short_frac", "seasonal_frac", "long_frac"]
+    diagnostics[variance_cols].to_csv(VARIANCE_OUTPUT, index=False)
+    diagnostics[["basin", "variable", "rmse"]].to_csv(RECON_ERROR_OUTPUT, index=False)
     diagnostics.to_csv(SUMMARY_OUTPUT, index=False)
-    print(f"✅ Saved basin-variable summary: {SUMMARY_OUTPUT}")
 
+    print(f"✅ Saved variance partition: {VARIANCE_OUTPUT}")
+    print(f"✅ Saved reconstruction error: {RECON_ERROR_OUTPUT}")
+    print(f"✅ Saved basin-variable summary: {SUMMARY_OUTPUT}")
     save_tidy_summary_table(diagnostics)
 
 
 def plot_example_decomposition(raw_df, wavelet_df, basin_id, variable, out_path):
-    """
-    Plot raw normalized anomaly series + reconstructed bands.
-    """
     if basin_id is None:
         return
 
     norm_col = variable if variable.endswith("_anomaly_normalized") else f"{variable}_anomaly_normalized"
     base = norm_col.replace("_anomaly_normalized", "")
-
     short_col = f"{base}_short"
     seasonal_col = f"{base}_seasonal"
     long_col = f"{base}_long"
 
-    time_col = choose_time_column(raw_df, norm_col)
-
-    raw_req = ["basin", "year", "month", time_col, norm_col]
-    wavelet_req = ["basin", "year", "month", short_col, seasonal_col, long_col]
-
-    raw_missing = [c for c in raw_req if c not in raw_df.columns]
-    wavelet_missing = [c for c in wavelet_req if c not in wavelet_df.columns]
-
+    required_raw = ["basin", "year", "month", "time", norm_col]
+    required_wavelet = ["basin", "year", "month", short_col, seasonal_col, long_col]
+    raw_missing = [c for c in required_raw if c not in raw_df.columns]
+    wavelet_missing = [c for c in required_wavelet if c not in wavelet_df.columns]
     if raw_missing or wavelet_missing:
-        print(
-            f"⚠️ Skipping plot for basin {basin_id}, variable {base}. "
-            f"Missing raw: {raw_missing} | missing wavelet: {wavelet_missing}"
-        )
+        print(f"⚠️ Skipping plot for basin {basin_id}, {base}; missing {raw_missing + wavelet_missing}")
         return
 
-    raw_plot = raw_df[raw_req].copy()
-    wavelet_plot = wavelet_df[wavelet_req].copy()
-
-    raw_plot = raw_plot[raw_plot["basin"] == basin_id].copy()
-    wavelet_plot = wavelet_plot[wavelet_plot["basin"] == basin_id].copy()
-
-    if raw_plot.empty or wavelet_plot.empty:
-        print(f"⚠️ No rows for basin {basin_id}, variable {base}")
+    raw_plot = raw_df.loc[raw_df["basin"] == basin_id, required_raw].copy()
+    wav_plot = wavelet_df.loc[wavelet_df["basin"] == basin_id, required_wavelet].copy()
+    if raw_plot.empty or wav_plot.empty:
         return
 
-    plot_df = raw_plot.merge(
-        wavelet_plot,
-        on=["basin", "year", "month"],
-        how="inner"
-    )
-
-    if plot_df.empty:
-        print(f"⚠️ No merged rows for basin {basin_id}, variable {base}")
-        return
-
-    plot_df[time_col] = pd.to_datetime(plot_df[time_col])
-    plot_df = plot_df.sort_values(time_col)
+    plot_df = raw_plot.merge(wav_plot, on=["basin", "year", "month"], how="inner")
+    plot_df = plot_df.sort_values("time")
 
     fig, axes = plt.subplots(4, 1, figsize=(14, 10), sharex=True)
-
-    axes[0].plot(plot_df[time_col], plot_df[norm_col])
+    axes[0].plot(plot_df["time"], plot_df[norm_col])
     axes[0].set_title(f"Basin {basin_id} | {base} | raw normalized anomaly")
-    axes[0].grid(True, alpha=0.3)
-
-    axes[1].plot(plot_df[time_col], plot_df[short_col])
+    axes[1].plot(plot_df["time"], plot_df[short_col])
     axes[1].set_title("short-term (D1 + D2)")
-    axes[1].grid(True, alpha=0.3)
-
-    axes[2].plot(plot_df[time_col], plot_df[seasonal_col])
+    axes[2].plot(plot_df["time"], plot_df[seasonal_col])
     axes[2].set_title("seasonal/annual (D3)")
-    axes[2].grid(True, alpha=0.3)
-
-    axes[3].plot(plot_df[time_col], plot_df[long_col])
+    axes[3].plot(plot_df["time"], plot_df[long_col])
     axes[3].set_title("long-term (D4 + D5 + A5)")
-    axes[3].grid(True, alpha=0.3)
 
+    for ax in axes:
+        ax.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
-
     print(f"✅ Saved figure: {out_path}")
 
 
-
 def plot_required_examples(raw_df, wavelet_df):
-    """
-    Create requested example plots for selected basins and variables.
-    """
     variable_map = {
         "GRACE TWSA": "lwe_thickness",
         "precipitation": "tp",
         "swvl1": "swvl1",
     }
-
     for basin_label, basin_id in EXAMPLE_BASINS.items():
-        for human_name, variable in variable_map.items():
-            out_name = f"{basin_label}_{variable}_wavelet_example.png"
-            out_path = os.path.join(FIGURE_DIR, out_name)
+        for _, variable in variable_map.items():
+            out_path = os.path.join(FIGURE_DIR, f"{basin_label}_{variable}_wavelet_example.png")
             plot_example_decomposition(raw_df, wavelet_df, basin_id, variable, out_path)
 
 
 def main():
-    print("--- Wavelet basin multi-scale decomposition ---")
+    print("--- Gap-aware wavelet basin multi-scale decomposition ---")
     print(f"Wavelet: {WAVELET} | Levels: {LEVEL}")
     print("Bands: short = D1 + D2, seasonal = D3, long = D4 + D5 + A5")
+    print(
+        f"Gap policy: interpolate only bounded gaps <= {MAX_INTERPOLATION_GAP_MONTHS} months; "
+        "leave longer gaps missing and decompose independent segments."
+    )
 
     df = load_dataset(INPUT_FILE)
     if df is None:
         return
+
+    df = add_canonical_time(df)
+    validate_monthly_grid(df)
 
     variables = detect_available_target_columns(df)
     save_wavelet_config(variables)
 
     wavelet_df, diagnostics = run_wavelet_decomposition(df, variables)
     merged_df = merge_wavelet_outputs_back(df, wavelet_df)
-    before = len(merged_df)
 
-    merged_df = merged_df.drop_duplicates(subset=["basin", "year", "month"])
-
-    after = len(merged_df)
-    print(f"✅ Dropped {before - after} duplicated basin-month rows")
-
-    dup_max = merged_df.groupby(["basin", "year", "month"]).size().max()
-    print(f"✅ Max rows per basin-year-month in wavelet output: {dup_max}")
-
-    dup_counts = merged_df.groupby(["basin", "year", "month"]).size()
-    bad = dup_counts[dup_counts > 1]
-
-    print(f"⚠️ Number of duplicated basin-month keys: {len(bad)}")
-
-    if len(bad) > 0:
-        print("Example duplicated keys:")
-        print(bad.head(10))
-
-    if len(bad) > 0:
-        bad_keys = bad.index.to_frame(index=False).head(10)
-        debug = merged_df.merge(bad_keys, on=["basin", "year", "month"], how="inner")
-        print(debug.sort_values(["basin", "year", "month"]).head(20))
+    if merged_df.duplicated(["basin", "year", "month"]).any():
+        raise ValueError("Duplicate basin-month rows found after wavelet merge.")
 
     save_outputs(merged_df, diagnostics)
     plot_required_examples(df, merged_df)
 
-    print("\nDiagnostics summary:")
-    print(diagnostics.groupby("variable")[["short_frac", "seasonal_frac", "long_frac", "rmse"]].mean())
-
+    print("\nGap / SWT diagnostics by variable:")
+    summary_cols = [
+        "n_missing_original", "n_short_gap_imputed", "n_missing_left_unfilled",
+        "n_swt_segments_used", "n_months_with_swt_output", "rmse",
+    ]
+    print(diagnostics.groupby("variable")[summary_cols].mean().round(3).to_string())
     print("--- Done ---")
 
 

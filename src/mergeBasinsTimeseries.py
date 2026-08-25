@@ -1,19 +1,18 @@
 # mergeBasinsTimeseries.py
-# Step 4.2: Merge basin-level time series from ERA5 and GRACE
+# Step 4.2: Merge basin-level ERA5 and GRACE on a complete monthly calendar
 
 import os
 import xarray as xr
 import pandas as pd
+import numpy as np
 
 ERA5_FILE = "data/interim/era5_basin_means_level04.nc"
 GRACE_FILE = "data/interim/grace_basin_means_level04.nc"
 OUTPUT_FILE = "data/interim/basin_era5_grace_merged.parquet"
+QC_OUTPUT = "results/tables/merged_monthly_continuity_qc.csv"
 
 
 def load_dataset(file_path, label):
-    """
-    Load a NetCDF dataset.
-    """
     try:
         ds = xr.open_dataset(file_path)
         print(f"✅ Loaded {label}: {file_path}")
@@ -24,120 +23,184 @@ def load_dataset(file_path, label):
 
 
 def prepare_dataset_dataframe(ds, dataset_name):
+    """Convert a basin-level xarray dataset to one row per basin-month.
+
+    The original source timestamp is preserved as ``time_<dataset_name>`` and a
+    canonical month-start timestamp is stored in ``time`` for alignment.
     """
-    Convert basin-level xarray dataset to a long pandas DataFrame
-    and extract year/month from time.
-    """
-    try:
-        if ds is None:
-            raise ValueError(f"{dataset_name} dataset is None")
+    if ds is None:
+        raise ValueError(f"{dataset_name} dataset is None")
+    if "time" not in ds.coords:
+        raise ValueError(f"{dataset_name} dataset has no 'time' coordinate")
+    if "basin" not in ds.coords:
+        raise ValueError(f"{dataset_name} dataset has no 'basin' coordinate")
 
-        if "time" not in ds.coords:
-            raise ValueError(f"{dataset_name} dataset has no 'time' coordinate")
+    var_names = list(ds.data_vars)
+    df = ds[var_names].to_dataframe().reset_index()
 
-        if "basin" not in ds.coords:
-            raise ValueError(f"{dataset_name} dataset has no 'basin' coordinate")
+    source_time_col = f"time_{dataset_name}"
+    df[source_time_col] = pd.to_datetime(df["time"])
+    df["time"] = df[source_time_col].dt.to_period("M").dt.to_timestamp()
+    df["year"] = df["time"].dt.year.astype(int)
+    df["month"] = df["time"].dt.month.astype(int)
 
-        # Keep only actual data variables
-        var_names = list(ds.data_vars)
-
-        df = ds[var_names].to_dataframe().reset_index()
-
-        # Make sure time is datetime
-        df["time"] = pd.to_datetime(df["time"])
-
-        # Extract merge keys
-        df["year"] = df["time"].dt.year
-        df["month"] = df["time"].dt.month
-
-        # Rename time to preserve source provenance if useful later
-        df = df.rename(columns={"time": f"time_{dataset_name}"})
-
-        print(f"✅ Prepared {dataset_name} DataFrame")
-        print(f"   Rows: {len(df):,}")
-        print(f"   Columns: {list(df.columns)}")
-
-        return df
-
-    except Exception as e:
-        print(f"❌ Failed to prepare {dataset_name} DataFrame: {e}")
-        return None
-
-
-def merge_era5_and_grace(era5_df, grace_df):
-    """
-    Merge ERA5 and GRACE basin-level time series by basin, year, month.
-    """
-    try:
-        if era5_df is None or grace_df is None:
-            raise ValueError("One or both input DataFrames are None")
-
-        merge_keys = ["basin", "year", "month"]
-
-        merged = pd.merge(
-            era5_df,
-            grace_df,
-            on=merge_keys,
-            how="inner",
-            suffixes=("_era5", "_grace")
+    key_cols = ["basin", "time"]
+    dup = df.duplicated(key_cols, keep=False)
+    if dup.any():
+        example = df.loc[dup, key_cols].head(10)
+        raise ValueError(
+            f"{dataset_name} contains duplicate basin-month rows. Examples:\n{example}"
         )
 
-        print("✅ Merged ERA5 and GRACE")
-        print(f"   Rows: {len(merged):,}")
-        print(f"   Columns: {list(merged.columns)}")
+    keep_cols = ["basin", "time", "year", "month", source_time_col] + var_names
+    df = df[keep_cols].sort_values(["basin", "time"]).reset_index(drop=True)
 
-        if "time_era5" in merged.columns and "time_grace" in merged.columns:
-            print("\nSample merged time columns:")
-            print(merged[["time_era5", "time_grace", "year", "month"]].head())
-
-        return merged
-
-    except Exception as e:
-        print(f"❌ Failed to merge ERA5 and GRACE: {e}")
-        return None
+    print(f"✅ Prepared {dataset_name} DataFrame")
+    print(f"   Rows: {len(df):,}")
+    print(f"   Basins: {df['basin'].nunique():,}")
+    print(f"   Period: {df['time'].min().date()} to {df['time'].max().date()}")
+    return df, var_names
 
 
-def save_merged_dataframe(df, output_file):
+def determine_common_time_envelope(era5_df, grace_df):
+    """Return the shared monthly time envelope of the two source products."""
+    start = max(era5_df["time"].min(), grace_df["time"].min())
+    end = min(era5_df["time"].max(), grace_df["time"].max())
+    if start > end:
+        raise ValueError("ERA5 and GRACE have no overlapping monthly period.")
+    return pd.Timestamp(start), pd.Timestamp(end)
+
+
+def build_complete_monthly_calendar(era5_df, start, end):
+    """Create a complete basin x month calendar using ERA5 basin coverage.
+
+    ERA5 is used only as the basin-support reference. Missing source months are
+    retained as explicit rows instead of being dropped by an inner merge.
     """
-    Save merged DataFrame to parquet.
-    """
-    try:
-        if df is None:
-            raise ValueError("Merged DataFrame is None")
+    basins = np.sort(era5_df["basin"].dropna().unique())
+    months = pd.date_range(start=start, end=end, freq="MS")
 
-        os.makedirs(os.path.dirname(output_file), exist_ok=True)
-        df.to_parquet(output_file, index=False)
+    full_index = pd.MultiIndex.from_product(
+        [basins, months], names=["basin", "time"]
+    )
+    calendar = full_index.to_frame(index=False)
+    calendar["year"] = calendar["time"].dt.year.astype(int)
+    calendar["month"] = calendar["time"].dt.month.astype(int)
 
-        print(f"✅ Saved merged dataset to: {output_file}")
-        return output_file
+    print("✅ Complete monthly calendar built")
+    print(f"   Basins: {len(basins):,}")
+    print(f"   Months: {len(months):,}")
+    print(f"   Expected basin-month rows: {len(calendar):,}")
+    return calendar
 
-    except Exception as e:
-        print(f"❌ Failed to save merged dataset: {e}")
-        return None
+
+def merge_on_complete_calendar(era5_df, grace_df, era5_vars, grace_vars):
+    """Align ERA5 and GRACE without deleting months that are missing in GRACE."""
+    start, end = determine_common_time_envelope(era5_df, grace_df)
+    print(f"✅ Common time envelope: {start.date()} to {end.date()}")
+
+    era5_sub = era5_df[(era5_df["time"] >= start) & (era5_df["time"] <= end)].copy()
+    grace_sub = grace_df[(grace_df["time"] >= start) & (grace_df["time"] <= end)].copy()
+
+    calendar = build_complete_monthly_calendar(era5_sub, start, end)
+
+    era5_keep = ["basin", "time", "time_era5"] + era5_vars
+    grace_keep = ["basin", "time", "time_grace"] + grace_vars
+
+    merged = calendar.merge(
+        era5_sub[era5_keep], on=["basin", "time"], how="left", validate="one_to_one"
+    )
+    merged = merged.merge(
+        grace_sub[grace_keep], on=["basin", "time"], how="left", validate="one_to_one"
+    )
+
+    merged = merged.sort_values(["basin", "time"]).reset_index(drop=True)
+
+    print("✅ ERA5 and GRACE aligned on complete monthly calendar")
+    print(f"   Rows: {len(merged):,}")
+    return merged
+
+
+def monthly_grid_is_complete(df):
+    """Verify exactly one row per basin for every calendar month in the envelope."""
+    duplicate_keys = int(df.duplicated(["basin", "time"]).sum())
+    if duplicate_keys:
+        raise ValueError(f"Found {duplicate_keys} duplicate basin-month rows.")
+
+    expected_months = pd.date_range(df["time"].min(), df["time"].max(), freq="MS")
+    counts = df.groupby("basin")["time"].nunique()
+    bad_basins = counts[counts != len(expected_months)]
+
+    if len(bad_basins):
+        raise ValueError(
+            f"Monthly calendar is incomplete for {len(bad_basins)} basins."
+        )
+
+    print("✅ Monthly continuity check passed for every basin")
+    return True
+
+
+def build_qc_table(df, era5_vars, grace_vars):
+    """Summarize calendar continuity and source-variable missingness."""
+    rows = []
+
+    base = {
+        "start_month": str(df["time"].min().date()),
+        "end_month": str(df["time"].max().date()),
+        "n_basins": int(df["basin"].nunique()),
+        "n_months": int(df["time"].nunique()),
+        "n_rows": int(len(df)),
+    }
+
+    for source, variables in [("ERA5", era5_vars), ("GRACE", grace_vars)]:
+        for var in variables:
+            row = dict(base)
+            row.update({
+                "source": source,
+                "variable": var,
+                "n_missing": int(df[var].isna().sum()),
+                "missing_fraction": float(df[var].isna().mean()),
+            })
+            rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def save_outputs(df, qc):
+    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
+    os.makedirs(os.path.dirname(QC_OUTPUT), exist_ok=True)
+
+    df.to_parquet(OUTPUT_FILE, index=False)
+    qc.to_csv(QC_OUTPUT, index=False)
+
+    print(f"✅ Saved merged monthly dataset: {OUTPUT_FILE}")
+    print(f"✅ Saved monthly continuity QC: {QC_OUTPUT}")
 
 
 def main():
-    print("--- Merge basin ERA5 + GRACE time series ---")
+    print("--- Merge basin ERA5 + GRACE on complete monthly calendar ---")
 
     era5_ds = load_dataset(ERA5_FILE, "ERA5")
     grace_ds = load_dataset(GRACE_FILE, "GRACE")
-
     if era5_ds is None or grace_ds is None:
         return
 
-    era5_df = prepare_dataset_dataframe(era5_ds, "era5")
-    grace_df = prepare_dataset_dataframe(grace_ds, "grace")
+    era5_df, era5_vars = prepare_dataset_dataframe(era5_ds, "era5")
+    grace_df, grace_vars = prepare_dataset_dataframe(grace_ds, "grace")
 
-    if era5_df is None or grace_df is None:
-        return
+    merged = merge_on_complete_calendar(
+        era5_df=era5_df,
+        grace_df=grace_df,
+        era5_vars=era5_vars,
+        grace_vars=grace_vars,
+    )
+    monthly_grid_is_complete(merged)
 
-    merged_df = merge_era5_and_grace(era5_df, grace_df)
+    qc = build_qc_table(merged, era5_vars, grace_vars)
+    print("\nMissingness summary:")
+    print(qc[["source", "variable", "n_missing", "missing_fraction"]].to_string(index=False))
 
-    if merged_df is None:
-        return
-
-    save_merged_dataframe(merged_df, OUTPUT_FILE)
-
+    save_outputs(merged, qc)
     print("--- Done ---")
 
 

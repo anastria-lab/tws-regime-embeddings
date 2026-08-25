@@ -15,8 +15,9 @@ ID_COLUMNS = [
     "basin",
     "year",
     "month",
-    "time_era5",
-    "time_grace",
+    "time",          # canonical month-start timestamp from the merge step
+    "time_era5",     # original ERA5 source timestamp, when present
+    "time_grace",    # original GRACE source timestamp, when present
 ]
 
 
