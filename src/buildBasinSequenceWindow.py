@@ -5,8 +5,9 @@ import os
 import pandas as pd
 import numpy as np
 
+# Canonical retrospective multiscale product. Both split-contained evaluation
+# windows and continuous scientific windows are drawn from the SAME feature product.
 ATLAS_INPUT_FILE = "data/processed/basin_dataset_wavelet_multiscale.parquet"
-EVAL_INPUT_FILE = "data/processed/basin_dataset_wavelet_multiscale_eval.parquet"
 
 # Split-aware windows used ONLY for model training / validation / test evaluation.
 EVAL_OUTPUT_FILE = "data/processed/window_metadata_v3.parquet"
@@ -322,57 +323,44 @@ def save_metadata(metadata, output_file, label):
         return None
 
 
-def ensure_same_channels(atlas_cols, eval_cols):
-    if atlas_cols != eval_cols:
-        only_atlas = sorted(set(atlas_cols) - set(eval_cols))
-        only_eval = sorted(set(eval_cols) - set(atlas_cols))
-        raise ValueError(
-            "Atlas/evaluation SWT channel mismatch. "
-            f"Only atlas: {only_atlas}; only evaluation: {only_eval}"
-        )
-
-
 def main():
     print("--- Step 7: Build evaluation + continuous basin sequence windows ---")
     print(f"Window length: {WINDOW_LENGTH} months | stride: {STRIDE} month")
 
     atlas_df = load_dataset(ATLAS_INPUT_FILE)
-    eval_df = load_dataset(EVAL_INPUT_FILE)
-    if atlas_df is None or eval_df is None:
+    if atlas_df is None:
         return
 
     atlas_df = assign_split(build_canonical_time(atlas_df))
-    eval_df = assign_split(build_canonical_time(eval_df))
 
     required_cols = {"basin", "year", "month"}
-    for label, df in [("atlas", atlas_df), ("evaluation", eval_df)]:
-        missing = required_cols - set(df.columns)
-        if missing:
-            raise ValueError(f"{label} dataset is missing required columns: {missing}")
+    missing = required_cols - set(atlas_df.columns)
+    if missing:
+        raise ValueError(f"Atlas dataset is missing required columns: {missing}")
 
-    atlas_channels = detect_channel_columns(atlas_df)
-    eval_channels = detect_channel_columns(eval_df)
-    ensure_same_channels(atlas_channels, eval_channels)
+    channel_cols = detect_channel_columns(atlas_df)
 
-    # Strict held-out windows come from split-local SWT channels.
-    eval_meta = build_evaluation_window_metadata(eval_df, eval_channels)
-    # Scientific trajectories come from the full-record retrospective SWT product.
-    continuous_meta = build_continuous_window_metadata(atlas_df, atlas_channels)
+    # Both products now use the same retrospective SWT definition. Evaluation
+    # windows are still strictly contained inside train/val/test time blocks.
+    eval_meta = build_evaluation_window_metadata(atlas_df, channel_cols)
+    continuous_meta = build_continuous_window_metadata(atlas_df, channel_cols)
 
     sanity_check_window_counts(eval_meta, "evaluation")
     sanity_check_no_evaluation_split_leakage(eval_meta)
-    sanity_check_shapes(eval_meta, expected_channels=len(eval_channels), label="evaluation")
+    sanity_check_shapes(eval_meta, expected_channels=len(channel_cols), label="evaluation")
 
     sanity_check_window_counts(continuous_meta, "continuous-analysis")
-    sanity_check_shapes(continuous_meta, expected_channels=len(atlas_channels), label="continuous-analysis")
+    sanity_check_shapes(continuous_meta, expected_channels=len(channel_cols), label="continuous-analysis")
     sanity_check_continuous_start_gaps(continuous_meta)
 
     save_metadata(eval_meta, EVAL_OUTPUT_FILE, "evaluation")
     save_metadata(continuous_meta, CONTINUOUS_OUTPUT_FILE, "continuous-analysis")
 
-    print("\n✅ Window-source separation:")
-    print(f"   evaluation windows <- {EVAL_INPUT_FILE}")
+    print("\n✅ Canonical feature source:")
+    print(f"   evaluation windows <- {ATLAS_INPUT_FILE}")
     print(f"   continuous windows <- {ATLAS_INPUT_FILE}")
+    print("   train/val/test windows cannot cross time-block boundaries")
+    print("   SWT itself is retrospective/non-causal and is NOT a forecasting evaluation")
     print("--- Done ---")
 
 

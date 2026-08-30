@@ -1,0 +1,16 @@
+{
+  "final_k": 3,
+  "selection_status": "final production regime solution",
+  "selection_basis": "parsimony + continuous-atlas cluster metrics + basin-resampling stability + Step-9C physical fingerprint comparison",
+  "clustering_space": "standardized 16-D continuous latent embeddings",
+  "umap_role": "visualization only; not used for clustering",
+  "random_state": 42,
+  "n_init": 20,
+  "candidate_step9c_ari": 1.0,
+  "label_map_raw_to_final": {
+    "0": 0,
+    "1": 1,
+    "2": 2
+  },
+  "important_interpretation": "Three recurrent regions within a continuous hydrological manifold; cluster names remain provisional until independent SPEI validation."
+}

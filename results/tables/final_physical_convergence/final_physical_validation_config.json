@@ -1,0 +1,34 @@
+{
+  "autoencoder_retrained": false,
+  "umap_used_for_quantitative_distance": false,
+  "duration_matching": "physical fingerprints use the exact historical/recent block start and end dates from the 38-window duration-matched audit",
+  "physical_variables": {
+    "TWSA": "lwe_thickness_anomaly_normalized",
+    "P": "tp_anomaly_normalized",
+    "SOIL4": "swvl4_anomaly_normalized",
+    "SRO": "sro_anomaly_normalized",
+    "SSRO": "ssro_anomaly_normalized"
+  },
+  "wavelet_long_variables": {
+    "TWSA": "lwe_thickness_long",
+    "P": "tp_long",
+    "SOIL4": "swvl4_long",
+    "SRO": "sro_long",
+    "SSRO": "ssro_long"
+  },
+  "wavelet_seasonal_variables": {
+    "TWSA": "lwe_thickness_seasonal",
+    "P": "tp_seasonal",
+    "SOIL4": "swvl4_seasonal"
+  },
+  "n_physical_features": 24,
+  "physical_pair_auc_screen": 0.75,
+  "support_quantiles": [
+    0.9,
+    0.95,
+    0.99
+  ],
+  "primary_support_quantile": 0.95,
+  "k_neighbors": 3,
+  "formal_koppen_reclassification_claim": false
+}

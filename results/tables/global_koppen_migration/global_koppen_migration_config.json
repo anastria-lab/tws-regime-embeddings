@@ -1,0 +1,17 @@
+{
+  "historical_window_end_max": "2020-12-01",
+  "fully_recent_window_start_min": "2021-01-01",
+  "source_anchor_threshold": 0.8,
+  "primary_pair_auc_screen": 0.8,
+  "pair_auc_sensitivity": [
+    0.75,
+    0.8,
+    0.85
+  ],
+  "common_drift_estimator": "per-end-time median of basin-centered standardized latent residuals",
+  "common_drift_historical_centering": true,
+  "representation_frozen": true,
+  "latent_dimensions": 16,
+  "quantitative_space": "historical-standardized 16D latent space",
+  "formal_koppen_reclassification_claim": false
+}

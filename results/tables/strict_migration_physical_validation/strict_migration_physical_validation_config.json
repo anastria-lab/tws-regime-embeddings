@@ -1,0 +1,10 @@
+{
+  "n_candidates_requested": 6,
+  "candidate_selection": "one best candidate per source-target pathway first, with source-class diversity, then strongest remaining pathways",
+  "historical_end": "2020-12-01",
+  "recent_start": "2021-01-01",
+  "physical_file": "data\\processed\\basin_dataset_anomaly_normalized.parquet",
+  "wavelet_file": "data\\processed\\basin_dataset_wavelet_multiscale.parquet",
+  "temperature_required_for_formal_koppen_change": true,
+  "autoencoder_retrained": false
+}

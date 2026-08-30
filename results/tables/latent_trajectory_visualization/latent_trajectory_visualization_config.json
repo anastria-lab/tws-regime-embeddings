@@ -1,0 +1,19 @@
+{
+  "visualization_only": true,
+  "quantitative_migration_space": "16-D latent space",
+  "umap_fit_period": "historical windows ending <= 2020-12",
+  "umap_fit_max_background_windows": 50000,
+  "umap_n_neighbors": 30,
+  "umap_min_dist": 0.12,
+  "umap_metric": "euclidean",
+  "strong_koppen_anchor_fraction": 0.8,
+  "recent_definition": "window start >= 2021-01",
+  "selected_basins": [
+    5040050850,
+    6040239720,
+    4040273960,
+    5040456070,
+    2040018240,
+    7040022850
+  ]
+}

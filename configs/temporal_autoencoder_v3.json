@@ -1,5 +1,5 @@
 {
-  "model": "TemporalConvAutoencoder",
+  "model": "TemporalConvAutoencoder_OrderPreserving_Stride1",
   "input_shape": [
     24,
     36
@@ -49,6 +49,13 @@
   "weight_decay": 1e-05,
   "patience": 8,
   "device": "cpu",
-  "input_file": "data/processed/basin_dataset_wavelet_multiscale.parquet",
-  "window_metadata_file": "data/processed/window_metadata_v3.parquet"
+  "evaluation_input_file": "data/processed/basin_dataset_wavelet_multiscale.parquet",
+  "atlas_input_file": "data/processed/basin_dataset_wavelet_multiscale.parquet",
+  "evaluation_window_metadata_file": "data/processed/window_metadata_v3.parquet",
+  "continuous_window_metadata_file": "data/processed/window_metadata_continuous_v3.parquet",
+  "evaluation_embeddings_output": "data/processed/embeddings_window_level_v3.parquet",
+  "continuous_embeddings_output": "data/processed/embeddings_window_level_continuous_v3.parquet",
+  "architecture_note": "Temporal order is preserved by retaining all 24 positions through stride-1 Conv1d layers and flattening the 16x24 temporal feature map before the 16-D bottleneck. No global average pooling, strided Conv1d, or ConvTranspose1d is used.",
+  "runtime_note": "Fast cached month-indexed window loading; CUDA uses native kernels with cuDNN disabled for RTX 2070 SUPER stability. CUDA_LAUNCH_BLOCKING is not required.",
+  "analysis_note": "The autoencoder is fit only with split-contained evaluation windows. Continuous full-record windows are encoded after training for scientific state-space, clustering, trajectory, and transition analyses."
 }

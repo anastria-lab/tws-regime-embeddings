@@ -1,0 +1,18 @@
+{
+  "historical_window_end_max": "2020-12-01",
+  "latent_dimensions": 16,
+  "anchor_thresholds": [
+    0.7,
+    0.8,
+    0.9
+  ],
+  "minimum_exact_class_basins": 10,
+  "pairwise_anchor_threshold": 0.8,
+  "pairwise_minimum_per_class": 12,
+  "max_cv_splits": 5,
+  "n_permutations": 20,
+  "representation_frozen": true,
+  "koppen_used_in_autoencoder_training": false,
+  "quantitative_space": "16D latent",
+  "umap_role": "visualization only"
+}

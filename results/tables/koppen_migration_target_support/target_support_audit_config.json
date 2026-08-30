@@ -1,0 +1,15 @@
+{
+  "representation_frozen": true,
+  "quantitative_space": "historical-standardized 16D latent basin means",
+  "source_anchor_threshold": 0.8,
+  "pairwise_auc_screen": 0.8,
+  "k_nearest_historical_basins": 3,
+  "support_quantiles": [
+    0.9,
+    0.95,
+    0.99
+  ],
+  "primary_support_quantile": 0.95,
+  "unknown_novel_class_allowed": true,
+  "formal_koppen_reclassification_claim": false
+}

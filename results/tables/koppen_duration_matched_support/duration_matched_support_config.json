@@ -1,0 +1,19 @@
+{
+  "representation_frozen": true,
+  "historical_window_end_max": "2020-12-01",
+  "recent_window_start_min": "2021-01-01",
+  "segment_length_windows": 38,
+  "historical_segments": "non-overlapping within monthly-contiguous runs",
+  "drift_correction": "same global drift correction as previous audit",
+  "source_anchor_threshold": 0.8,
+  "pairwise_auc_screen": 0.8,
+  "k_neighbors": 3,
+  "support_quantiles": [
+    0.9,
+    0.95,
+    0.99
+  ],
+  "primary_support_quantile": 0.95,
+  "unknown_novel_allowed": true,
+  "formal_koppen_reclassification_claim": false
+}
